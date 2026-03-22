@@ -1,0 +1,340 @@
+import { getJointLimits, radiansToDegrees } from './DHParameters';
+import { ForwardKinematics } from './ForwardKinematics';
+import { QuaternionMath } from './QuaternionMath';
+import {
+  IKBranchId,
+  IKSolveOptions,
+  PoseQuat
+} from './types';
+
+export interface AnalyticalIKCandidate {
+  jointAngles: number[];
+  branchId: IKBranchId;
+  positionResidualM: number;
+  orientationResidualRad: number;
+  singularityFlags: string[];
+  valid: boolean;
+  notes?: string[];
+}
+
+const DEG_TO_RAD = Math.PI / 180;
+const RAD_TO_DEG = 180 / Math.PI;
+
+const clamp = (value: number, min: number, max: number): number => (
+  Math.min(max, Math.max(min, value))
+);
+
+const wrapDeg = (value: number): number => {
+  if (!Number.isFinite(value)) return 0;
+  return ((value % 360) + 540) % 360 - 180;
+};
+
+const norm3 = (x: number, y: number, z: number): number => Math.hypot(x, y, z);
+
+type BranchSpec = {
+  shoulder: 'L' | 'R';
+  elbow: 'U' | 'D';
+};
+
+const BRANCH_SPECS: BranchSpec[] = [
+  { shoulder: 'L', elbow: 'U' },
+  { shoulder: 'L', elbow: 'D' },
+  { shoulder: 'R', elbow: 'U' },
+  { shoulder: 'R', elbow: 'D' }
+];
+
+const makeBranchId = (shoulder: 'L' | 'R', elbow: 'U' | 'D', wristFlip: 'F' | 'N'): IKBranchId => (
+  `S${shoulder}_E${elbow}_W${wristFlip}` as IKBranchId
+);
+
+// Geometric constants derived from URDF joint origins:
+//   BASE_HEIGHT = J1.z + J2.z = 0.08 + 0.05595 = 0.13595
+//   RADIAL_OFFSET = hypot(J2.x, J2.y) = hypot(0.0375, 0.02) ≈ 0.0425
+//   L1 = |J3.y in J2 frame| = 0.16 (upper arm)
+//   L2 ≈ 0.1434 (forearm: J3→wrist center distance in planar projection)
+const BASE_HEIGHT = 0.13595;
+const RADIAL_OFFSET = 0.0425;
+const L1 = 0.16;
+const L2 = 0.1434;
+
+/**
+ * Analytical-first branch generator:
+ * - closed-form decoupled estimate for J1-J3
+ * - deterministic wrist branch expansion (normal/flip)
+ * - optional local wrist refinement on J4-J6
+ */
+export class AnalyticalPieperIK {
+  private minDeg: number[];
+  private maxDeg: number[];
+
+  constructor() {
+    const limits = getJointLimits();
+    this.minDeg = radiansToDegrees(limits.min);
+    this.maxDeg = radiansToDegrees(limits.max);
+  }
+
+  setJointLimitsDeg(minDeg: number[], maxDeg: number[]): void {
+    if (!Array.isArray(minDeg) || !Array.isArray(maxDeg) || minDeg.length !== 6 || maxDeg.length !== 6) {
+      return;
+    }
+    this.minDeg = [...minDeg];
+    this.maxDeg = [...maxDeg];
+  }
+
+  solveCandidates(
+    targetPose: PoseQuat,
+    options?: Partial<IKSolveOptions>
+  ): AnalyticalIKCandidate[] {
+    const targetPos = targetPose.position;
+    const targetOrientation = targetPose.orientation;
+    const baseYaw = Math.atan2(targetPos.y, targetPos.x) * RAD_TO_DEG;
+
+    const candidates: AnalyticalIKCandidate[] = [];
+    for (const branch of BRANCH_SPECS) {
+      const q1Deg = wrapDeg(baseYaw + (branch.shoulder === 'R' ? 180 : 0));
+      const q1Rad = q1Deg * DEG_TO_RAD;
+      // Project target into J1-rotated frame for correct shoulder-right geometry.
+      const radialInFrame = Math.cos(q1Rad) * targetPos.x + Math.sin(q1Rad) * targetPos.y;
+      const planar = this.solvePlanarShoulderElbow(radialInFrame, targetPos.z, branch.elbow);
+      if (!planar) continue;
+
+      const q2Deg = planar.q2Deg;
+      const q3Deg = planar.q3Deg;
+
+      const wristSeeds = [
+        { q: [0, 0, 0], wristFlip: 'N' as const },
+        { q: [180, 0, 180], wristFlip: 'F' as const }
+      ];
+
+      for (const wristSeed of wristSeeds) {
+        const qBase = [q1Deg, q2Deg, q3Deg, wristSeed.q[0], wristSeed.q[1], wristSeed.q[2]];
+        const wrist = this.refineWristOrientation(targetOrientation, qBase, options, targetPos);
+        const jointAngles = this.applyLimitEnvelope(wrist.angles);
+        const fk = ForwardKinematics.solve(jointAngles);
+        if (!fk.success) continue;
+
+        const posErr = norm3(
+          targetPos.x - fk.endEffectorPose.position.x,
+          targetPos.y - fk.endEffectorPose.position.y,
+          targetPos.z - fk.endEffectorPose.position.z
+        );
+        const oriErrVec = QuaternionMath.logMapError(
+          targetOrientation,
+          QuaternionMath.fromEuler(fk.endEffectorPose.rotation)
+        );
+        const orientationResidual = norm3(oriErrVec.x, oriErrVec.y, oriErrVec.z);
+        const singularityFlags: string[] = [];
+        if (Math.abs(Math.sin((jointAngles[4] || 0) * DEG_TO_RAD)) < 0.02) {
+          singularityFlags.push('wrist_pitch_near_singularity');
+        }
+
+        const branchId = makeBranchId(branch.shoulder, branch.elbow, wristSeed.wristFlip);
+        candidates.push({
+          jointAngles,
+          branchId,
+          positionResidualM: posErr,
+          orientationResidualRad: orientationResidual,
+          singularityFlags,
+          valid: posErr <= 0.05,
+          notes: wrist.notes
+        });
+      }
+    }
+
+    // Sorting delegated to ContinuityPolicy.rankCandidates in HybridIKSolver.
+    return candidates;
+  }
+
+  private solvePlanarShoulderElbow(
+    radialInFrame: number,
+    z: number,
+    elbow: 'U' | 'D'
+  ): { q2Deg: number; q3Deg: number } | null {
+    // Planar 2R solve in the J1-rotated shoulder plane.
+    const radial = Math.max(0.02, radialInFrame - RADIAL_OFFSET);
+    const vertical = z - BASE_HEIGHT;
+    const cosElbow = clamp(
+      (radial * radial + vertical * vertical - L1 * L1 - L2 * L2) / (2 * L1 * L2),
+      -1,
+      1
+    );
+    if (!Number.isFinite(cosElbow)) return null;
+
+    const elbowMag = Math.acos(cosElbow);
+    const q3 = elbow === 'D' ? elbowMag : -elbowMag;
+    const q2 = Math.atan2(vertical, radial) - Math.atan2(L2 * Math.sin(q3), L1 + L2 * Math.cos(q3));
+    return {
+      q2Deg: q2 * RAD_TO_DEG,
+      q3Deg: q3 * RAD_TO_DEG
+    };
+  }
+
+  private refineWristOrientation(
+    targetOrientation: { w: number; x: number; y: number; z: number },
+    seedAnglesDeg: number[],
+    options?: Partial<IKSolveOptions>,
+    targetPosition?: { x: number; y: number; z: number }
+  ): { angles: number[]; notes: string[] } {
+    const angles = [...seedAnglesDeg];
+    const maxIter = 8;
+    const gain = 0.9;
+    const maxStep = options?.maxStepDeg ?? 6;
+    const notes: string[] = [];
+
+    // Measure initial position error for drift guard (EDGE-07).
+    const fkInit = ForwardKinematics.solve(angles);
+    const initialPosErr = (fkInit.success && targetPosition)
+      ? norm3(
+          targetPosition.x - fkInit.endEffectorPose.position.x,
+          targetPosition.y - fkInit.endEffectorPose.position.y,
+          targetPosition.z - fkInit.endEffectorPose.position.z
+        )
+      : Number.POSITIVE_INFINITY;
+    const posErrCeiling = initialPosErr * 1.5 + 0.005;
+
+    for (let iter = 0; iter < maxIter; iter++) {
+      const fk = ForwardKinematics.solve(angles);
+      if (!fk.success) break;
+
+      const currentQ = QuaternionMath.fromEuler(fk.endEffectorPose.rotation);
+      const err = QuaternionMath.logMapError(targetOrientation, currentQ);
+      const errNorm = norm3(err.x, err.y, err.z);
+      if (errNorm < 0.01) break;
+
+      // Local finite-difference orientation Jacobian w.r.t J4-J6 only.
+      const j = Array.from({ length: 3 }, () => Array(3).fill(0));
+      const delta = 0.2;
+      for (let idx = 0; idx < 3; idx++) {
+        const jointIdx = idx + 3;
+        const plus = [...angles];
+        const minus = [...angles];
+        plus[jointIdx] += delta;
+        minus[jointIdx] -= delta;
+
+        const fkPlus = ForwardKinematics.solve(plus);
+        const fkMinus = ForwardKinematics.solve(minus);
+        if (!fkPlus.success || !fkMinus.success) continue;
+
+        const qPlus = QuaternionMath.fromEuler(fkPlus.endEffectorPose.rotation);
+        const qMinus = QuaternionMath.fromEuler(fkMinus.endEffectorPose.rotation);
+        const axisErr = QuaternionMath.logMapError(qPlus, qMinus);
+        j[0][idx] = axisErr.x / (2 * delta);
+        j[1][idx] = axisErr.y / (2 * delta);
+        j[2][idx] = axisErr.z / (2 * delta);
+      }
+
+      const jt = this.transpose3(j);
+      const a = this.mul3(jt, j);
+      const lambda = 1e-3 + (errNorm > 0.1 ? 5e-3 : 0);
+      for (let i = 0; i < 3; i++) {
+        a[i][i] += lambda;
+      }
+      const b = this.mulVec3(jt, [err.x, err.y, err.z]);
+      const dq = this.solveLinear3(a, b);
+      if (!dq) break;
+
+      const prevAngles = [...angles];
+      for (let i = 0; i < 3; i++) {
+        const step = clamp(dq[i] * gain, -maxStep, maxStep);
+        angles[i + 3] = wrapDeg(angles[i + 3] + step);
+      }
+
+      // Position drift guard: if wrist step degrades position, halve the step.
+      if (targetPosition) {
+        const fkAfter = ForwardKinematics.solve(angles);
+        if (fkAfter.success) {
+          const posErr = norm3(
+            targetPosition.x - fkAfter.endEffectorPose.position.x,
+            targetPosition.y - fkAfter.endEffectorPose.position.y,
+            targetPosition.z - fkAfter.endEffectorPose.position.z
+          );
+          if (posErr > posErrCeiling) {
+            // Halve step: average with previous
+            for (let i = 3; i < 6; i++) {
+              angles[i] = wrapDeg((prevAngles[i] + angles[i]) * 0.5);
+            }
+            notes.push('wrist_position_drift_damped');
+          }
+        }
+      }
+    }
+
+    const j5Sin = Math.abs(Math.sin((angles[4] || 0) * DEG_TO_RAD));
+    if (j5Sin < 0.015) {
+      // Deterministic wrist bypass: preserve combined roll around singular coupling.
+      const combined = wrapDeg((angles[3] || 0) + (angles[5] || 0));
+      angles[3] = combined;
+      angles[5] = 0;
+      notes.push('wrist_singularity_bypass_applied');
+    }
+
+    return { angles, notes };
+  }
+
+  private applyLimitEnvelope(angles: number[]): number[] {
+    const out = [...angles];
+    for (let i = 0; i < 6; i++) {
+      out[i] = clamp(wrapDeg(out[i] || 0), this.minDeg[i], this.maxDeg[i]);
+    }
+    return out;
+  }
+
+  private transpose3(m: number[][]): number[][] {
+    return [
+      [m[0][0], m[1][0], m[2][0]],
+      [m[0][1], m[1][1], m[2][1]],
+      [m[0][2], m[1][2], m[2][2]]
+    ];
+  }
+
+  private mul3(a: number[][], b: number[][]): number[][] {
+    const out = Array.from({ length: 3 }, () => Array(3).fill(0));
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        out[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+      }
+    }
+    return out;
+  }
+
+  private mulVec3(a: number[][], x: number[]): number[] {
+    return [
+      a[0][0] * x[0] + a[0][1] * x[1] + a[0][2] * x[2],
+      a[1][0] * x[0] + a[1][1] * x[1] + a[1][2] * x[2],
+      a[2][0] * x[0] + a[2][1] * x[1] + a[2][2] * x[2]
+    ];
+  }
+
+  private solveLinear3(a: number[][], b: number[]): number[] | null {
+    // Gaussian elimination with partial pivoting (small 3x3 fallback).
+    const m = a.map((row) => [...row]);
+    const v = [...b];
+    for (let col = 0; col < 3; col++) {
+      let pivot = col;
+      let maxAbs = Math.abs(m[col][col]);
+      for (let row = col + 1; row < 3; row++) {
+        const abs = Math.abs(m[row][col]);
+        if (abs > maxAbs) {
+          maxAbs = abs;
+          pivot = row;
+        }
+      }
+      if (maxAbs < 1e-10) return null;
+      if (pivot !== col) {
+        [m[col], m[pivot]] = [m[pivot], m[col]];
+        [v[col], v[pivot]] = [v[pivot], v[col]];
+      }
+
+      const diag = m[col][col];
+      for (let j = col; j < 3; j++) m[col][j] /= diag;
+      v[col] /= diag;
+      for (let row = 0; row < 3; row++) {
+        if (row === col) continue;
+        const factor = m[row][col];
+        for (let j = col; j < 3; j++) m[row][j] -= factor * m[col][j];
+        v[row] -= factor * v[col];
+      }
+    }
+    return v;
+  }
+}

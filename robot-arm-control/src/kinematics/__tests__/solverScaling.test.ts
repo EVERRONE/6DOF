@@ -1,5 +1,6 @@
 import { ForwardKinematics } from '../ForwardKinematics';
 import { InverseKinematics } from '../InverseKinematics';
+import { HybridIKSolver } from '../HybridIKSolver';
 
 describe('IK normalization scaling', () => {
   test('normalized regularization keeps near-boundary solve stable for practical posture weights', () => {
@@ -78,6 +79,27 @@ describe('IK normalization scaling', () => {
 
     expect(result.success).toBe(true);
     expect(elapsed).toBeLessThan(200);
+  }, 5000);
+
+  test('HybridIKSolver endpoint_global solve under 300ms for a standard reachable target', () => {
+    const solver = new HybridIKSolver();
+    const seed = [0, -20, 40, 0, 0, 0];
+    const fk = ForwardKinematics.solve(seed);
+    expect(fk.success).toBe(true);
+    if (!fk.success) return;
+
+    const target = {
+      position: { x: fk.endEffectorPose.position.x + 0.03, y: fk.endEffectorPose.position.y, z: fk.endEffectorPose.position.z },
+      rotation: fk.endEffectorPose.rotation
+    };
+
+    const t0 = performance.now();
+    const result = solver.solvePose(target, seed, { mode: 'pose_lock', intent: 'endpoint_global', profile: 'balanced' });
+    const elapsed = performance.now() - t0;
+
+    expect(result.success).toBe(true);
+    expect((result.quality?.positionResidualM ?? Infinity) * 1000).toBeLessThan(2.0);
+    expect(elapsed).toBeLessThan(300);
   }, 5000);
 });
 
