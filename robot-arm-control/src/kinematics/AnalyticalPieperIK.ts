@@ -101,10 +101,21 @@ export class AnalyticalPieperIK {
       const q2Deg = planar.q2Deg;
       const q3Deg = planar.q3Deg;
 
-      const wristSeeds = [
-        { q: [0, 0, 0], wristFlip: 'N' as const },
-        { q: [180, 0, 180], wristFlip: 'F' as const }
+      const wristSeeds: Array<{ q: [number, number, number]; wristFlip: 'N' | 'F' }> = [
+        { q: [0, 0, 0], wristFlip: 'N' },
+        { q: [180, 0, 180], wristFlip: 'F' }
       ];
+
+      // Warm-start: if a previous solution is available, insert its J4–J6 as a
+      // third seed. This is almost always the best seed during trajectory tracking
+      // and costs nothing extra — it replaces a bad cold-start with a nearby guess.
+      const prevSol = options?.previousSolutionDeg;
+      if (Array.isArray(prevSol) && prevSol.length === 6) {
+        const prevJ5 = prevSol[4] ?? 0;
+        // Always label the warm-start seed as 'N'. The refine loop corrects
+        // wrist flip naturally; a wrong label only costs one extra refine iter.
+        wristSeeds.unshift({ q: [prevSol[3] ?? 0, prevJ5, prevSol[5] ?? 0], wristFlip: 'N' });
+      }
 
       for (const wristSeed of wristSeeds) {
         const qBase = [q1Deg, q2Deg, q3Deg, wristSeed.q[0], wristSeed.q[1], wristSeed.q[2]];
