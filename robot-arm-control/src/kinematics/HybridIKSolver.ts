@@ -103,6 +103,15 @@ export class HybridIKSolver {
     this.maxDeg = radiansToDegrees(limits.max);
   }
 
+  /**
+   * Clear persisted branch state before a new endpoint_global move starts.
+   * Call this from robotStore before each moveToPosition() to prevent branch
+   * contamination from the previous motion's tracking_local interpolation.
+   */
+  resetBranchState(): void {
+    this.lastBranchId = undefined;
+  }
+
   setJointLimitsDeg(minDeg: number[], maxDeg: number[]): void {
     if (!Array.isArray(minDeg) || !Array.isArray(maxDeg) || minDeg.length !== 6 || maxDeg.length !== 6) {
       return;
@@ -324,7 +333,8 @@ export class HybridIKSolver {
     }
 
     // EDGE-12: Auto-release branch lock when preferred branch becomes unreachable.
-    if (!bestSuccess && bestFailure?.result.failureCategory === 'branch_discontinuity') {
+    const releasedPos = bestFailure?.result.quality?.positionResidualM ?? Number.POSITIVE_INFINITY;
+    if (!bestSuccess && bestFailure?.result.failureCategory === 'branch_discontinuity' && releasedPos <= 0.015) {
       const released: IKResult = {
         ...bestFailure.result,
         success: true,
