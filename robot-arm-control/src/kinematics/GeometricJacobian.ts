@@ -1,9 +1,11 @@
 import { Matrix4x4, Rotation3, Vector3 } from './types';
 import { ROBOT_KINEMATIC_CHAIN } from './URDFParser';
+import { JointFrame } from './UrdfChainKinematics';
 
 const DEG_TO_RAD = Math.PI / 180;
 
-type JointFrame = {
+// Local name to avoid collision with the exported JointFrame from UrdfChainKinematics.
+type LocalJointFrame = {
   origin: Vector3;
   axis: Vector3;
 };
@@ -130,7 +132,7 @@ export class GeometricJacobian {
     }
 
     const qRad = jointAnglesDeg.map((deg) => deg * DEG_TO_RAD);
-    const frames: JointFrame[] = [];
+    const frames: LocalJointFrame[] = [];
     let cumulative = identity();
 
     for (let i = 0; i < ROBOT_KINEMATIC_CHAIN.length; i++) {
@@ -165,6 +167,36 @@ export class GeometricJacobian {
       jacobian[3][i] = axis.x * DEG_TO_RAD;
       jacobian[4][i] = axis.y * DEG_TO_RAD;
       jacobian[5][i] = axis.z * DEG_TO_RAD;
+    }
+
+    return jacobian;
+  }
+
+  /**
+   * Compute Jacobian from pre-computed joint frames (no second chain traversal).
+   * Call this after UrdfChainKinematics.solveWithJointFrames() to share the chain
+   * traversal work. pEe is the end-effector position from the FK result.
+   */
+  static computeFromFrames(
+    jointFrames: JointFrame[],
+    pEe: Vector3
+  ): number[][] {
+    const jacobian = Array.from({ length: 6 }, () => Array(6).fill(0));
+
+    for (let i = 0; i < jointFrames.length && i < 6; i++) {
+      const { origin, axisWorld } = jointFrames[i];
+      const dx = pEe.x - origin.x;
+      const dy = pEe.y - origin.y;
+      const dz = pEe.z - origin.z;
+
+      // Linear velocity: axis × (pEe - origin), scaled to degree-input convention.
+      jacobian[0][i] = (axisWorld.y * dz - axisWorld.z * dy) * DEG_TO_RAD;
+      jacobian[1][i] = (axisWorld.z * dx - axisWorld.x * dz) * DEG_TO_RAD;
+      jacobian[2][i] = (axisWorld.x * dy - axisWorld.y * dx) * DEG_TO_RAD;
+      // Angular velocity: world-frame axis, scaled to degree-input convention.
+      jacobian[3][i] = axisWorld.x * DEG_TO_RAD;
+      jacobian[4][i] = axisWorld.y * DEG_TO_RAD;
+      jacobian[5][i] = axisWorld.z * DEG_TO_RAD;
     }
 
     return jacobian;

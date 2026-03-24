@@ -182,7 +182,7 @@ export class InverseKinematics {
     const residualM = nextState?.metrics.positionResidualM ?? Number.POSITIVE_INFINITY;
     const orientationResidualRad = nextState?.metrics.orientationResidualRad ?? Number.POSITIVE_INFINITY;
     const weightedResidual = nextState?.metrics.weightedResidual ?? Number.POSITIVE_INFINITY;
-    const success = residualM <= 0.010;
+    const success = residualM <= opts.tolerancePositionM;
     const failureCategory: IKResult['failureCategory'] | undefined = success
       ? undefined
       : (residualM > 0.0035 ? 'invalid_target' : 'max_iterations');
@@ -488,7 +488,7 @@ export class InverseKinematics {
     opts: Required<IKSolveOptions>,
     computeDiagnostics: boolean
   ): SolveState | null {
-    const fk = ForwardKinematics.solve(q);
+    const { fk, jacobian } = ForwardKinematics.solveWithJacobian(q);
     if (!fk.success) return null;
 
     const posError = this.vectorSubtract(targetPose.position, fk.endEffectorPose.position);
@@ -503,8 +503,6 @@ export class InverseKinematics {
       Math.pow(opts.positionWeight * positionResidualM, 2) +
       Math.pow(opts.orientationWeight * orientationResidualRad, 2)
     );
-
-    const jacobian = ForwardKinematics.computeJacobian(q);
     const spectrum = computeDiagnostics
       ? this.computeSingularSpectrum(jacobian)
       : { minSingularValue: Number.POSITIVE_INFINITY, conditionNumber: 1.0 };

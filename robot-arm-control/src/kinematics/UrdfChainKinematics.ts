@@ -11,6 +11,16 @@ export interface UrdfFkResult {
   jointTransforms: Matrix4x4[];
 }
 
+/** Per-joint data recorded BEFORE applying the joint rotation — used by GeometricJacobian. */
+export interface JointFrame {
+  origin: Vector3;
+  axisWorld: Vector3;
+}
+
+export interface UrdfFkWithFramesResult extends UrdfFkResult {
+  jointFrames: JointFrame[];
+}
+
 /**
  * FK kernel aligned with the URDF chain used by the 3D viewer.
  * This is the single Cartesian frame source of truth for FK/IK/UI readouts.
@@ -201,5 +211,61 @@ export class UrdfChainKinematics {
 
   private static copyMatrix(matrix: Matrix4x4): Matrix4x4 {
     return matrix.map((row) => [...row]);
+  }
+
+  /**
+   * Single-pass FK that also records per-joint axis+origin (before joint rotation)
+   * for Jacobian computation. Eliminates the duplicate chain traversal when both
+   * FK and Jacobian are needed.
+   */
+  static solveWithJointFrames(jointAnglesDeg: number[]): UrdfFkWithFramesResult {
+    const jointAnglesRad = jointAnglesDeg.map((deg) => (deg * Math.PI) / 180);
+
+    let cumulative = this.createIdentityMatrix();
+    const transforms: Matrix4x4[] = [];
+    const jointFrames: JointFrame[] = [];
+
+    for (let i = 0; i < ROBOT_KINEMATIC_CHAIN.length; i++) {
+      const joint = ROBOT_KINEMATIC_CHAIN[i];
+
+      // Apply origin translation then RPY rotation — same steps as composeJointTransform
+      // but split so we can capture the frame BEFORE the joint rotation is applied.
+      const originTranslation = this.translationMatrix(
+        joint.origin.xyz.x, joint.origin.xyz.y, joint.origin.xyz.z
+      );
+      const originRotation = this.multiplyMatrices(
+        this.rotationZMatrix(joint.origin.rpy.yaw),
+        this.multiplyMatrices(
+          this.rotationYMatrix(joint.origin.rpy.pitch),
+          this.rotationXMatrix(joint.origin.rpy.roll)
+        )
+      );
+      const beforeJoint = this.multiplyMatrices(
+        cumulative,
+        this.multiplyMatrices(originTranslation, originRotation)
+      );
+
+      // World-frame joint axis: rotate local axis by the cumulative orientation.
+      const ax = joint.axis;
+      const axN = Math.hypot(ax.x, ax.y, ax.z) || 1;
+      jointFrames.push({
+        origin: { x: beforeJoint[0][3], y: beforeJoint[1][3], z: beforeJoint[2][3] },
+        axisWorld: {
+          x: (beforeJoint[0][0] * ax.x + beforeJoint[0][1] * ax.y + beforeJoint[0][2] * ax.z) / axN,
+          y: (beforeJoint[1][0] * ax.x + beforeJoint[1][1] * ax.y + beforeJoint[1][2] * ax.z) / axN,
+          z: (beforeJoint[2][0] * ax.x + beforeJoint[2][1] * ax.y + beforeJoint[2][2] * ax.z) / axN
+        }
+      });
+
+      // Now apply joint rotation and accumulate.
+      cumulative = this.multiplyMatrices(beforeJoint, this.axisAngleMatrix(joint.axis, jointAnglesRad[i]));
+      transforms.push(this.copyMatrix(cumulative));
+    }
+
+    return {
+      endEffectorPose: this.extractPose(cumulative),
+      jointTransforms: transforms,
+      jointFrames
+    };
   }
 }
