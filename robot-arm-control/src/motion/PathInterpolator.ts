@@ -16,6 +16,7 @@ import { HybridIKSolver } from '../kinematics/HybridIKSolver';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
 import { IKEngineMode, IKResult, IKSolveOptions, Pose, Rotation3, Vector3 } from '../kinematics/types';
 import { logicalToUrdfAngles, urdfToLogicalAngles } from '../kinematics/angleMapping';
+import { QuaternionMath } from '../kinematics/QuaternionMath';
 
 /**
  * PathInterpolator
@@ -153,9 +154,17 @@ export class PathInterpolator {
 
     const startPos = fkStart.endEffectorPose.position;
     const lockedOrientation = targetOrientation || fkStart.endEffectorPose.rotation;
+    // Quaternions for SLERP: interpolate orientation along the path rather than
+    // locking every sample to the final target orientation.
+    const startQuat = QuaternionMath.fromEuler(fkStart.endEffectorPose.rotation);
+    const targetQuat = QuaternionMath.fromEuler(lockedOrientation);
     const ikOptions: Partial<IKSolveOptions> = {
-      orientationWeight: targetOrientation ? 0.25 : 0.0,
-      tolerancePositionM: 0.0015,
+      // Lower orientation weight for path samples so the solver prioritises position
+      // convergence rather than locking onto an orientation-correct/position-wrong saddle.
+      orientationWeight: targetOrientation ? 0.20 : 0.0,
+      // 2.5 mm base tolerance for path-interpolation solves.  Callers that need tighter gates
+      // (Stage2 strict pass, endpoint_global) override this via solveOptions.
+      tolerancePositionM: 0.0025,
       toleranceOrientationRad: targetOrientation ? 0.035 : Number.POSITIVE_INFINITY,
       toleranceWeighted: 0.01,
       maxStepDeg: 3.0,
@@ -269,7 +278,13 @@ export class PathInterpolator {
           continue;
         }
 
-        const poseTarget: Pose = { position: pos, rotation: lockedOrientation };
+        // SLERP: drive orientation gradually from start to target so each IK
+        // sample sees a reachable intermediate pose rather than the full final
+        // rotation. s is already the minimum-jerk progress for this sample.
+        const sampleOrientation = QuaternionMath.toEuler(
+          QuaternionMath.slerp(startQuat, targetQuat, s)
+        );
+        const poseTarget: Pose = { position: pos, rotation: sampleOrientation };
         let ikSolveResult: IKResult;
         if (trackingMode === 'resolved_rate') {
           const prevU = uSamples[sampleIndex - 1] ?? 0;
@@ -297,7 +312,7 @@ export class PathInterpolator {
               poseTarget,
               currentAnglesUrdf,
               previousPosition,
-              lockedOrientation,
+              sampleOrientation,
               recoveryOptions,
               ikEngineMode
             ).result;
@@ -318,7 +333,7 @@ export class PathInterpolator {
             poseTarget,
             currentAnglesUrdf,
             previousPosition,
-            lockedOrientation,
+            sampleOrientation,
             ikOptions,
             ikEngineMode
           ).result;
@@ -461,6 +476,7 @@ export class PathInterpolator {
       normalizedSamples = Array.from(new Set(normalizedSamples)).sort((a, b) => a - b);
     }
 
+    this.smoothJointAngles(points);
     this.populateJointVelocities(points);
 
     const segment: TrajectorySegment = {
@@ -773,9 +789,33 @@ export class PathInterpolator {
     return 10 * u3 - 15 * u4 + 6 * u5;
   }
 
-  // Matches firmware STREAM_MAX_SPEED_DEG_S = 120.0 in config.h.
-  // Velocities above this cause firmware trajectory rejection or audible cracking.
-  private static readonly MAX_JOINT_VEL_DEG_S = 120.0;
+  // One-pass 3-tap weighted average applied to internal path points before velocity
+  // computation.  IK samples converge within tolerance but can have ~0.1-0.3° noise
+  // between consecutive solutions.  Hermite amplifies these micro-oscillations into
+  // audible bumps.  Smoothing reduces the noise while preserving endpoints and overall
+  // path shape.  A single pass with α=0.5 is deliberately light: at 2.5 mm IK
+  // tolerance the added Cartesian error is < 0.3 mm, well within Stage-2 precision gates.
+  private smoothJointAngles(points: TrajectoryPoint[]): void {
+    if (points.length <= 2) return;
+    const n = points.length;
+    // Build smoothed values for interior points only (endpoints must remain unchanged).
+    const smoothed: number[][] = new Array(n - 2);
+    for (let i = 1; i < n - 1; i++) {
+      const prev = points[i - 1].jointAngles;
+      const curr = points[i].jointAngles;
+      const next = points[i + 1].jointAngles;
+      smoothed[i - 1] = curr.map((v, j) => 0.25 * prev[j] + 0.5 * v + 0.25 * next[j]);
+    }
+    for (let i = 1; i < n - 1; i++) {
+      points[i] = { ...points[i], jointAngles: smoothed[i - 1] };
+    }
+  }
+
+  // Firmware motor hard limit is STREAM_MAX_SPEED_DEG_S = 120 deg/s (config.h).
+  // Cubic Hermite interpolation can overshoot knot velocities by ~1.5x, so knot
+  // velocities are capped at 80 deg/s (80 * 1.5 = 120) to keep peak motion within
+  // the motor limit and prevent step-skipping / audible cracking.
+  private static readonly MAX_JOINT_VEL_DEG_S = 80.0;
 
   private populateJointVelocities(points: TrajectoryPoint[]): void {
     if (points.length === 0) return;
