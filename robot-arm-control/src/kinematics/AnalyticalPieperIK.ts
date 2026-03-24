@@ -204,7 +204,8 @@ export class AnalyticalPieperIK {
     const posErrCeiling = initialPosErr * 1.5 + 0.005;
 
     for (let iter = 0; iter < maxIter; iter++) {
-      const fk = ForwardKinematics.solve(angles);
+      // Single-pass: obtain FK + analytic Jacobian with one chain traversal.
+      const { fk, jacobian: fullJ } = ForwardKinematics.solveWithJacobian(angles);
       if (!fk.success) break;
 
       const currentQ = QuaternionMath.fromEuler(fk.endEffectorPose.rotation);
@@ -212,27 +213,14 @@ export class AnalyticalPieperIK {
       const errNorm = norm3(err.x, err.y, err.z);
       if (errNorm < 0.01) break;
 
-      // Local finite-difference orientation Jacobian w.r.t J4-J6 only.
-      const j = Array.from({ length: 3 }, () => Array(3).fill(0));
-      const delta = 0.2;
-      for (let idx = 0; idx < 3; idx++) {
-        const jointIdx = idx + 3;
-        const plus = [...angles];
-        const minus = [...angles];
-        plus[jointIdx] += delta;
-        minus[jointIdx] -= delta;
-
-        const fkPlus = ForwardKinematics.solve(plus);
-        const fkMinus = ForwardKinematics.solve(minus);
-        if (!fkPlus.success || !fkMinus.success) continue;
-
-        const qPlus = QuaternionMath.fromEuler(fkPlus.endEffectorPose.rotation);
-        const qMinus = QuaternionMath.fromEuler(fkMinus.endEffectorPose.rotation);
-        const axisErr = QuaternionMath.logMapError(qPlus, qMinus);
-        j[0][idx] = axisErr.x / (2 * delta);
-        j[1][idx] = axisErr.y / (2 * delta);
-        j[2][idx] = axisErr.z / (2 * delta);
-      }
+      // Analytic orientation Jacobian: extract the angular sub-block (rows 3-5, cols 3-5).
+      // J[row+3][col+3] = axisWorld[col] * DEG_TO_RAD for the angular component, which
+      // equals the central-difference approximation to first order.
+      const j = [
+        [fullJ[3][3], fullJ[3][4], fullJ[3][5]],
+        [fullJ[4][3], fullJ[4][4], fullJ[4][5]],
+        [fullJ[5][3], fullJ[5][4], fullJ[5][5]]
+      ];
 
       const jt = this.transpose3(j);
       const a = this.mul3(jt, j);

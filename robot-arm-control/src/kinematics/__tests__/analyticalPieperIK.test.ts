@@ -1,6 +1,7 @@
 import { AnalyticalPieperIK } from '../AnalyticalPieperIK';
 import { ForwardKinematics } from '../ForwardKinematics';
 import { QuaternionMath } from '../QuaternionMath';
+import { Vector3 } from '../types';
 
 describe('AnalyticalPieperIK', () => {
   test('enumerates deterministic branch candidates for a reachable target', () => {
@@ -59,5 +60,41 @@ describe('AnalyticalPieperIK', () => {
     if (bestWith && bestWithout) {
       expect(bestWith.orientationResidualRad).toBeLessThanOrEqual(bestWithout.orientationResidualRad + 0.01);
     }
+  });
+
+  test('refineWristOrientation uses analytic Jacobian (solveWithJacobian) instead of FD', () => {
+    // This test verifies that the wrist refinement loop calls solveWithJacobian
+    // (the combined FK+Jacobian path) rather than calling ForwardKinematics.solve
+    // six extra times per iteration for finite-difference columns.
+    const solveWithJSpy = jest.spyOn(ForwardKinematics, 'solveWithJacobian');
+    const solveSpy = jest.spyOn(ForwardKinematics, 'solve');
+
+    const solver = new AnalyticalPieperIK();
+    const knownGood = [5, -25, 45, 120, -30, 15];
+    const fk = ForwardKinematics.solve(knownGood);
+    expect(fk.success).toBe(true);
+    if (!fk.success) return;
+
+    const targetPose = QuaternionMath.toPoseQuat(fk.endEffectorPose);
+    solveSpy.mockClear();
+    solveWithJSpy.mockClear();
+
+    solver.solveCandidates(targetPose, { previousSolutionDeg: knownGood });
+
+    const jwCalls = solveWithJSpy.mock.calls.length;
+    const directCalls = solveSpy.mock.calls.length;
+
+    // After the change: solveWithJacobian must be called in the inner loop.
+    expect(jwCalls).toBeGreaterThan(0);
+
+    // After the change: the 6-call FD block inside the wrist refinement loop is
+    // eliminated. Only the drift-guard call (1 per iteration), the initial-error
+    // probe (1 per seed), and the post-refine candidate evaluation (1 per seed)
+    // remain as direct ForwardKinematics.solve calls.
+    // With 4 branches × 3 seeds × (1 probe + ≤8 drift + 1 eval) = at most ~120 calls.
+    // The old FD approach would produce ≥600 calls (4×3×8×(1+6+1) + …).
+    expect(directCalls).toBeLessThan(200);
+
+    jest.restoreAllMocks();
   });
 });
