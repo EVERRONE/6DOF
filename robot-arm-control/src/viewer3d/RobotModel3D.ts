@@ -3,8 +3,6 @@ import * as THREE from 'three';
 import { JointNode, Robot3DModel } from './types';
 import { loadAllRobotMeshes, createMeshFromGeometry, getLinkColor } from './STLLoader';
 import { ROBOT_KINEMATIC_CHAIN } from '../kinematics/URDFParser';
-import { ForwardKinematics } from '../kinematics/ForwardKinematics';
-import { Matrix4x4 } from '../kinematics/types';
 
 /**
  * Build 3D robot model from STL meshes
@@ -278,6 +276,64 @@ export function createWorkspaceBoundary(
 }
 
 /**
+ * Create a sector (pie slice) workspace boundary representing J1 ±halfAngleDeg freedom.
+ * J1 rotates about the Z axis (vertical/up in this viewer). The sector sweeps
+ * in the XY plane and extrudes along +Z (upward).
+ */
+export function createWorkspaceSector(
+  halfAngleDeg: number = 60,
+  radiusM: number = 0.4,
+  zMin: number = 0,
+  zMax: number = 0.4,
+  color: number = 0x00ff00,
+  opacity: number = 0.05
+): THREE.Object3D {
+  const group = new THREE.Group();
+  group.name = 'WorkspaceSector';
+
+  const segments = 32;
+  const halfAngleRad = (halfAngleDeg * Math.PI) / 180;
+  const height = zMax - zMin;
+
+  // Build a 2D sector shape in the XY plane.
+  // Angle 0 = +X axis (forward direction). Sweep from -halfAngle to +halfAngle.
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0);
+  for (let i = 0; i <= segments; i++) {
+    const angle = -halfAngleRad + (2 * halfAngleRad * i) / segments;
+    shape.lineTo(Math.cos(angle) * radiusM, Math.sin(angle) * radiusM);
+  }
+  shape.lineTo(0, 0);
+
+  const extrudeSettings: THREE.ExtrudeGeometryOptions = {
+    depth: height,
+    bevelEnabled: false
+  };
+
+  const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+
+  // Semi-transparent fill
+  const fillMaterial = new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    side: THREE.DoubleSide
+  });
+  const fillMesh = new THREE.Mesh(geometry, fillMaterial);
+  fillMesh.position.z = zMin;
+  group.add(fillMesh);
+
+  // Wireframe outline
+  const edges = new THREE.EdgesGeometry(geometry);
+  const edgeMaterial = new THREE.LineBasicMaterial({ color, linewidth: 1 });
+  const wireframe = new THREE.LineSegments(edges, edgeMaterial);
+  wireframe.position.z = zMin;
+  group.add(wireframe);
+
+  return group;
+}
+
+/**
  * Create target position marker
  */
 export function createTargetMarker(color: number = 0xff0000): THREE.Object3D {
@@ -316,8 +372,8 @@ export function createGroundPlane(size: number = 1.0): THREE.Mesh {
   });
 
   const plane = new THREE.Mesh(geometry, material);
-  plane.rotation.x = -Math.PI / 2;
-  plane.position.y = -0.01; // Slightly below origin
+  // Z-up world: keep the ground in XY plane at z ~= 0.
+  plane.position.z = -0.01; // Slightly below origin
   plane.receiveShadow = true;
 
   return plane;
@@ -328,6 +384,8 @@ export function createGroundPlane(size: number = 1.0): THREE.Mesh {
  */
 export function createGrid(size: number = 1.0, divisions: number = 20): THREE.GridHelper {
   const grid = new THREE.GridHelper(size, divisions, 0x444444, 0x222222);
-  grid.position.y = 0;
+  // GridHelper is XZ by default (Y-up), so rotate to XY for Z-up world.
+  grid.rotation.x = Math.PI / 2;
+  grid.position.z = 0;
   return grid;
 }

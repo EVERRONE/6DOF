@@ -5,19 +5,20 @@ import * as THREE from 'three';
 import { useRobotStore } from '../store/robotStore';
 import {
   RobotModel3DBuilder,
-  createWorkspaceBoundary,
+  createWorkspaceSector,
   createTargetMarker,
   createGroundPlane,
   createGrid
 } from '../viewer3d/RobotModel3D';
 import { Robot3DModel } from '../viewer3d/types';
+import { getEffectiveUrdfOffsets, logicalToUrdfAngles } from '../kinematics/angleMapping';
 
 /**
  * Robot 3D Component
  * Loads and renders the robot with real-time FK updates
  */
 const Robot3D: React.FC = () => {
-  const { currentAngles } = useRobotStore();
+  const { currentAngles, firmwareConfig } = useRobotStore();
   const [model, setModel] = useState<Robot3DModel | null>(null);
   const [loading, setLoading] = useState(true);
   const builderRef = useRef<RobotModel3DBuilder | null>(null);
@@ -55,18 +56,19 @@ const Robot3D: React.FC = () => {
   // Update robot pose when joint angles change
   useEffect(() => {
     if (builderRef.current && model) {
-      const anglesArray = [
+      const offsets = getEffectiveUrdfOffsets(firmwareConfig);
+      const anglesArray = logicalToUrdfAngles([
         currentAngles.J1,
         currentAngles.J2,
         currentAngles.J3,
         currentAngles.J4,
         currentAngles.J5,
         currentAngles.J6
-      ];
+      ], offsets);
 
       builderRef.current.updatePose(anglesArray);
     }
-  }, [currentAngles, model]);
+  }, [currentAngles, firmwareConfig, model]);
 
   if (loading) {
     return <LoadingIndicator />;
@@ -80,25 +82,26 @@ const Robot3D: React.FC = () => {
 };
 
 /**
- * Workspace Boundary Visualization
+ * Workspace Sector Visualization — J1 ±60° zone
  */
 const WorkspaceBoundary: React.FC<{ visible: boolean }> = ({ visible }) => {
   const boundaryRef = useRef<THREE.Object3D>(null);
 
   useEffect(() => {
-    const boundary = createWorkspaceBoundary(
-      [-0.3, 0.3],  // X range: +/-300mm
-      [-0.3, 0.3],  // Y range: +/-300mm
-      [0, 0.4],     // Z range: 0-400mm
-      0x00ff00,     // Green
-      0.05          // Low opacity
+    const sector = createWorkspaceSector(
+      60,       // J1 ±60° half-angle
+      0.4,      // 400mm radius (estimate — verify against FK at new joint limits)
+      0,        // zMin
+      0.4,      // zMax = 400mm
+      0x00ff00, // Green
+      0.05      // Low opacity
     );
 
-    boundaryRef.current = boundary;
+    boundaryRef.current = sector;
 
     return () => {
-      boundary.traverse((obj) => {
-        if (obj instanceof THREE.Mesh) {
+      sector.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) {
           obj.geometry.dispose();
           if (obj.material instanceof THREE.Material) {
             obj.material.dispose();
@@ -276,7 +279,7 @@ const Lighting: React.FC = () => {
 
       {/* Main directional light (sun) */}
       <directionalLight
-        position={[5, 10, 5]}
+        position={[5, 5, 10]}
         intensity={0.8}
         castShadow
         shadow-mapSize-width={2048}
@@ -289,12 +292,12 @@ const Lighting: React.FC = () => {
       />
 
       {/* Fill light from opposite side */}
-      <directionalLight position={[-5, 5, -5]} intensity={0.3} />
+      <directionalLight position={[-5, -5, 5]} intensity={0.3} />
 
       {/* Hemisphere light for ambient color */}
       <hemisphereLight
         args={[0x87CEEB, 0x545454, 0.3]}
-        position={[0, 50, 0]}
+        position={[0, 0, 50]}
       />
     </>
   );
@@ -338,11 +341,17 @@ export const RobotViewer3D: React.FC = () => {
         shadows
         gl={{ antialias: true, alpha: false }}
         dpr={[1, 2]}
+        onCreated={({ camera, scene }) => {
+          // Keep viewer coordinates Z-up to match FK/IK and URDF convention.
+          camera.up.set(0, 0, 1);
+          scene.up.set(0, 0, 1);
+        }}
       >
         {/* Camera */}
         <PerspectiveCamera
           makeDefault
           position={[0.8, 0.6, 0.8]}
+          up={[0, 0, 1]}
           fov={50}
         />
 
