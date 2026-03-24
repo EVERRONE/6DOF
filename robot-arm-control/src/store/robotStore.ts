@@ -203,14 +203,16 @@ const FEATURE_REACHABILITY_ATLAS_V1 = process.env.REACT_APP_REACHABILITY_ATLAS_V
 const FEATURE_MOTION_KERNEL_V2 = process.env.REACT_APP_MOTION_KERNEL_V2 !== '0';
 const FEATURE_IK_ANALYTIC_PRIMARY_V1 = process.env.REACT_APP_IK_ANALYTIC_PRIMARY_V1 !== '0';
 const FEATURE_IK_RESOLVED_RATE_V1 = process.env.REACT_APP_IK_RESOLVED_RATE_V1 !== '0';
-const FEATURE_IK_COLLISION_CHECK_V1 = process.env.REACT_APP_IK_COLLISION_CHECK_V1 === '1';
+const FEATURE_IK_COLLISION_CHECK_V1 = process.env.REACT_APP_IK_COLLISION_CHECK_V1 !== '0';
 const FEATURE_IK_DIAGNOSTICS_LOG = process.env.REACT_APP_IK_DIAGNOSTICS_LOG === '1';
 const FEATURE_INDUSTRIAL_PROFILE_V1 = process.env.REACT_APP_INDUSTRIAL_PROFILE_V1 === '1';
 
 const DEFAULT_IK_PLANNING_BUDGET: IKPlanningBudget = {
   stage1BudgetMs: 500,
   stage2MaxMs: 6000,
-  trackingMaxIterations: 20
+  // 30 iterations gives the DLS solver enough budget to escape the near-tolerance
+  // damping death spiral that occurs when the arm approaches the workspace boundary.
+  trackingMaxIterations: 30
 };
 const STAGE2_TIMEOUT_MIN_MS = 6000;
 const STAGE2_TIMEOUT_MAX_MS = 20000;
@@ -1521,6 +1523,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       );
       set((state) => ({
         planningState: 'failed',
+        moveInProgress: false,
+        moveTargetSnapshot: null,
+        moveStableCount: 0,
+        robotState: state.moveInProgress ? RobotState.IDLE : state.robotState,
         planningLatencyMs: performance.now() - planningStartedAt,
         planningNotes: notes,
         planningDiagnostics: [...plannerDiagnostics],
@@ -1742,7 +1748,12 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       const trackingMode: IKTrackingMode = resolvedRateEnabled ? 'resolved_rate' : 'iterative_pose';
       const base: Partial<IKSolveOptions> = {
         positionWeight: 1.0,
-        orientationWeight: isPoseLock ? (useLegacy ? 0.25 : 0.35) : 0.0,
+        // For path-sample solves (tracking_local) use a lower orientation weight so the solver
+        // prioritises closing the position gap rather than getting stuck in an orientation-correct /
+        // position-wrong saddle point.  Endpoint solves keep the full weight.
+        orientationWeight: isPoseLock
+          ? (intent === 'tracking_local' ? 0.20 : (useLegacy ? 0.25 : 0.35))
+          : 0.0,
         maxStepDeg: variant === 'base' ? 4.0 : 5.5,
         maxJointVelocityDegS: useLegacy ? 100 : 115,
         maxJointAccelerationDegS2: useLegacy ? 300 : 340,
@@ -1752,7 +1763,12 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         dampingShrink: useLegacy ? 0.75 : 0.7,
         singularityThreshold: useLegacy ? 0.000001 : 0.0000005,
         postureWeight: variant === 'base' ? 0.0000002 : 0.00000005,
-        tolerancePositionM: 0.0015,
+        // tracking_local is a path-feasibility solve; 2.5 mm balances convergence reliability
+        // (avoids saddle at ~2.3 mm with orientationWeight=0.20) and trajectory smoothness
+        // (tighter than 3 mm reduces IK oscillation between consecutive path samples).
+        // Stage-2 and endpoint_global apply the strict 1.5 mm precision gate after the
+        // feasibility path is established.
+        tolerancePositionM: intent === 'tracking_local' ? 0.0025 : 0.0015,
         toleranceOrientationRad: isPoseLock ? 0.026 : Number.POSITIVE_INFINITY,
         toleranceWeighted: 0.01,
         activeConstraints: isPoseLock ? ['position', 'orientation_hold'] : ['position'],
@@ -1877,67 +1893,20 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const primaryEndpoint = runEndpointGroup(cartesianMode);
     let endpointSolved = primaryEndpoint.success;
 
-    if (!endpointSolved && cartesianMode === 'pose_lock') {
-      const posOnlyProbe = runEndpointGroup('position_only');
-      if (posOnlyProbe.success) {
-        const failed = primaryEndpoint.bestFailure?.result
-          ? IKRuntimeService.withContext(
-              primaryEndpoint.bestFailure.result,
-              ikSolveContext,
-              'endpoint',
-              undefined,
-              'IK_ENDPOINT_ORIENTATION_INFEASIBLE'
-            )
-          : undefined;
-        setPlanningFailure(
-          'Pose lock infeasible for this target at current limits. Switch to Position Only and retry.',
-          failed,
-          [
-            `Mode=${cartesianMode}`,
-            `Attempts=${primaryEndpoint.attempts.length}`,
-            'Position-only endpoint probe succeeded.'
-          ],
-          'orientation_infeasible'
-        );
-        return;
-      }
-    }
-
-    if (!endpointSolved) {
-      const failed = primaryEndpoint.bestFailure?.result
-        ? IKRuntimeService.withContext(
-            primaryEndpoint.bestFailure.result,
-            ikSolveContext,
-            'endpoint',
-            undefined,
-            'IK_ENDPOINT_FAILED'
-          )
-        : undefined;
-      const bestResidual = failed?.quality?.positionResidualM ?? Number.POSITIVE_INFINITY;
-      const failureCategory: IKResult['failureCategory'] =
-        Number.isFinite(bestResidual) && bestResidual > CARTESIAN_INVALID_TARGET_RESIDUAL_M
-          ? 'invalid_target'
-          : (failed?.failureCategory || 'max_iterations');
-      setPlanningFailure(
-        failed?.error || 'Endpoint IK failed',
-        failed,
-        [
-          `Mode=${cartesianMode}`,
-          `Attempts=${primaryEndpoint.attempts.length}`,
-          `Best residual ${(bestResidual * 1000).toFixed(2)}mm`
-        ],
-        failureCategory
-      );
-      return;
-    }
+    // Endpoint solve is a global feasibility heuristic. When it fails (e.g.
+    // starting from joint-limit configurations such as immediately after homing),
+    // we proceed to path interpolation anyway: tracking_local uses warm
+    // incremental steps and can reach targets the global endpoint solve cannot.
+    // The stage1 position-only probe and stage1 failure handlers below
+    // correctly classify orientation-infeasible and truly-unreachable targets.
 
     if (requestId !== activePlannerRequestId) {
       return;
     }
 
-    const endpointPreferredBranch = endpointSolved.result.branchId || statefulPreferredBranch;
+    const endpointPreferredBranch = endpointSolved?.result.branchId || statefulPreferredBranch;
     let stage1PointsPerSecond = clampToRange(
-      Math.min(12, effectivePointsPerSecond),
+      Math.min(22, effectivePointsPerSecond),
       CARTESIAN_ABSOLUTE_MIN_POINTS_PER_SEC,
       Math.max(CARTESIAN_ABSOLUTE_MIN_POINTS_PER_SEC, effectivePointsPerSecond)
     );
@@ -1993,6 +1962,15 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         trackingMaxIterations: DEFAULT_IK_PLANNING_BUDGET.trackingMaxIterations + 8,
         maxSeeds: 2,
         maxStages: 2,
+        // Looser positional and orientation gates for the fallback pass.
+        // orientationWeight stays at 0.30 (original value): for near-limit poses the
+        // orientation gradient actively guides the solver into the correct basin of
+        // attraction.  Lowering it to 0.20 (same as base) was tested and made both
+        // position AND orientation residuals worse in practice.
+        // 3.5 mm (up from 3.0 mm): paths that converge to 3.0–3.5 mm are still useful
+        // as Stage2 seeds; tightening this gate caused false joint_limit rejections on
+        // otherwise reachable targets.
+        tolerancePositionM: 0.0035,
         toleranceOrientationRad: cartesianMode === 'pose_lock' ? 0.04 : Number.POSITIVE_INFINITY,
         toleranceWeighted: 0.014,
         orientationWeight: cartesianMode === 'pose_lock' ? 0.30 : 0.0
@@ -2023,11 +2001,19 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
     if (hasStage1Failure(stage1Interpolation) && cartesianMode === 'pose_lock') {
       const positionOnlyProbe = planStage1('position_only', 'relaxed', stage1PointsPerSecond, {
-        preferredBranch: undefined,
+        // Use the same branch as the pose-lock solve so the probe tests reachability
+        // on the same arm configuration.  preferredBranch: undefined would cause the
+        // solver to explore a different branch, yielding worse position residuals than
+        // the pose-lock solve itself and producing false "joint_limit" classifications.
+        preferredBranch: endpointPreferredBranch,
         trackingMaxIterations: DEFAULT_IK_PLANNING_BUDGET.trackingMaxIterations + 8,
         maxSeeds: 2,
         maxStages: 2,
-        toleranceWeighted: 0.014,
+        // Loose 6 mm gate: the probe is a reachability indicator, not a precision solve.
+        // The target position is typically reachable if the position-only solve gets
+        // within 6 mm; precision is enforced by stage-2.
+        tolerancePositionM: 0.006,
+        toleranceWeighted: 0.020,
         orientationWeight: 0.0,
         toleranceOrientationRad: Number.POSITIVE_INFINITY
       });
@@ -2041,36 +2027,98 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         );
       }
       if (!hasStage1Failure(positionOnlyProbe)) {
-        setPlanningFailure(
-          'Pose lock infeasible along Cartesian path at current limits. Switch to Position Only and retry.',
-          stage1Interpolation.lastIK || endpointSolved.result,
-          [
-            `Mode=${cartesianMode}`,
-            ...stage1AttemptNotes,
-            `Stage1 position-only probe succeeded at ${stage1PointsPerSecond}Hz`
-          ],
-          'orientation_infeasible'
+        // The position is geometrically reachable (probe passed) but the pose-locked solve failed.
+        // Only classify as orientation_infeasible when orientation residual actually exceeds tolerance.
+        // If orientation residual is well within tolerance, the solver just failed to converge on
+        // position — labelling that as orientation_infeasible gives the user wrong advice.
+        const POSE_LOCK_ORIENTATION_TOL_RAD = 0.026;
+        const lastOriResidual = stage1Interpolation.lastIK?.quality?.orientationResidualRad;
+        const orientationIsActuallyInfeasible =
+          lastOriResidual === undefined || lastOriResidual >= POSE_LOCK_ORIENTATION_TOL_RAD;
+        if (orientationIsActuallyInfeasible) {
+          setPlanningFailure(
+            'Pose lock infeasible along Cartesian path at current limits. Switch to Position Only and retry.',
+            stage1Interpolation.lastIK || endpointSolved?.result || primaryEndpoint.bestFailure?.result,
+            [
+              `Mode=${cartesianMode}`,
+              ...stage1AttemptNotes,
+              `Stage1 position-only probe succeeded at ${stage1PointsPerSecond}Hz`
+            ],
+            'orientation_infeasible'
+          );
+          return;
+        }
+
+        // Orientation is within tolerance but position is stuck (orientationWeight=0.20 creates a
+        // saddle at ~9mm for some path regions).  Try a soft pose-lock with near-zero orientation
+        // weight so the position gradient dominates.  If it produces a feasible path, Stage2 will
+        // attempt to tighten orientation back to the strict 0.026 rad limit.
+        const softLockAttempt = planStage1('pose_lock', 'relaxed', stage1PointsPerSecond, {
+          orientationWeight: 0.05,
+          tolerancePositionM: 0.003,
+          toleranceOrientationRad: 0.10,
+          toleranceWeighted: 0.025,
+          trackingMaxIterations: DEFAULT_IK_PLANNING_BUDGET.trackingMaxIterations + 12,
+          maxSeeds: 3,
+          maxStages: 3
+        });
+        if (!hasStage1Failure(softLockAttempt)) {
+          // Soft lock found a feasible path — promote it and fall through to Stage2.
+          stage1Interpolation = softLockAttempt;
+          stage1FallbackUsed = true;
+          stage1AttemptNotes.push(
+            `Stage1 soft-lock (weight=0.05) succeeded; Stage2 will enforce full pose-lock`
+          );
+          // No return — fall through to Stage2.
+        } else {
+          stage1AttemptNotes.push(`Stage1 soft-lock failed: ${stage1FailureReason(softLockAttempt)}`);
+          setPlanningFailure(
+            'Failed to converge along Cartesian path. Try a shorter move, lower speed, or switch to Position Only.',
+            stage1Interpolation.lastIK || endpointSolved?.result || primaryEndpoint.bestFailure?.result,
+            [
+              `Mode=${cartesianMode}`,
+              ...stage1AttemptNotes,
+              `Stage1 position-only probe succeeded at ${stage1PointsPerSecond}Hz`,
+              `ori residual ${lastOriResidual?.toFixed(4)} rad (within tolerance)`
+            ],
+            'max_iterations'
+          );
+          return;
+        }
+      } else {
+        stage1AttemptNotes.push(
+          `Stage1 position-only probe failed: ${stage1FailureReason(positionOnlyProbe)}`
         );
-        return;
       }
-      stage1AttemptNotes.push(
-        `Stage1 position-only probe failed: ${stage1FailureReason(positionOnlyProbe)}`
-      );
     }
 
     if (hasStage1Failure(stage1Interpolation)) {
+      const stage1FailureCategory = stage1Interpolation.lastIK?.failureCategory || 'max_iterations';
+      // If the endpoint IK succeeded the target position IS reachable.  Path-tracking can still
+      // fail with failureCategory='joint_limit' because an intermediate waypoint near a joint
+      // limit resists convergence — that is a path-quality issue, not true unreachability.
+      // Override to 'max_iterations' so the user gets actionable advice ("try a different
+      // starting pose") rather than the misleading "outside reachable workspace" message.
+      const effectiveCategory: IKResult['failureCategory'] = (endpointSolved && stage1FailureCategory === 'joint_limit')
+        ? 'max_iterations'
+        : (stage1FailureCategory || endpointSolved?.result.failureCategory || 'max_iterations');
+      const stage1Message = effectiveCategory === 'joint_limit'
+        ? 'Target is outside the robot\'s reachable workspace (joint limit). Try a closer position or move the arm to a different starting pose.'
+        : endpointSolved
+          ? 'Path planning failed: the trajectory passes near a joint limit. Try a different starting pose or switch to Position Only mode.'
+          : stage1Interpolation.error || 'Stage1 fast feasibility path failed';
       setPlanningFailure(
-        stage1Interpolation.error || 'Stage1 fast feasibility path failed',
+        stage1Message,
         stage1Interpolation.lastIK || {
-          jointAngles: endpointSolved.result.jointAngles,
-          failureCategory: endpointSolved.result.failureCategory || 'max_iterations'
+          jointAngles: endpointSolved?.result.jointAngles ?? currentLogicalAngles,
+          failureCategory: endpointSolved?.result.failureCategory || 'max_iterations'
         },
         [
           `Mode=${cartesianMode}`,
           ...stage1AttemptNotes,
           `Stage1 ${stage1PointsPerSecond}Hz feasibility path failed`
         ],
-        stage1Interpolation.lastIK?.failureCategory || endpointSolved.result.failureCategory || 'max_iterations'
+        effectiveCategory
       );
       return;
     }
@@ -2079,7 +2127,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       setPlanningFailure(
         `Stage1 feasibility path exceeded queue budget (${stage1Interpolation.segment.points.length} > ${queuePointBudget}).`,
         stage1Interpolation.lastIK || {
-          jointAngles: endpointSolved.result.jointAngles,
+          jointAngles: endpointSolved?.result.jointAngles ?? currentLogicalAngles,
           failureCategory: 'queue_upload_failed'
         },
         [
@@ -2094,7 +2142,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const stage1LatencyMs = performance.now() - planningStartedAt;
     const stage1FeasibleAngles =
       stage1Interpolation.segment.points[stage1Interpolation.segment.points.length - 1]?.jointAngles ||
-      endpointSolved.logicalSolution;
+      endpointSolved?.logicalSolution ||
+      currentLogicalAngles;
     const stage2MinPointsPerSecond = Math.min(CARTESIAN_STAGE2_MIN_POINTS_PER_SEC, effectivePointsPerSecond);
     const stage2StrictIkOptions = createIkOptions(cartesianMode, 'base', 'tracking_local', {
       preferredBranch: endpointPreferredBranch,
@@ -2137,10 +2186,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       ],
       ikDiagnostics: {
         attempts: primaryEndpoint.attempts.length,
-        bestStage: endpointSolved.stage,
-        bestResidualMm: (endpointSolved.result.quality?.positionResidualM ?? 0) * 1000,
-        branchId: endpointSolved.result.quality?.branchId || (reachabilityProbe.branchId || 'unknown'),
-        seedIndex: endpointSolved.result.quality?.seedIndex ?? 0
+        bestStage: endpointSolved?.stage || 'path_interpolation',
+        bestResidualMm: (endpointSolved?.result.quality?.positionResidualM ?? stage1Interpolation.lastIK?.quality?.positionResidualM ?? 0) * 1000,
+        branchId: endpointSolved?.result.quality?.branchId || stage1Interpolation.lastIK?.branchId || (reachabilityProbe.branchId || 'unknown'),
+        seedIndex: endpointSolved?.result.quality?.seedIndex ?? 0
       }
     });
 
@@ -2278,7 +2327,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       const successNotes = [
         `Mode=${cartesianMode}`,
         `Path=${plannedSpeedMmS.toFixed(1)}mm/s @ ${stage2.chosenPps}Hz`,
-        `Stage1 endpoint seed from ${endpointSolved.stage}`,
+        `Stage1 endpoint seed from ${endpointSolved?.stage || 'path_interpolation'}`,
         ...stage2.notes,
         'Low XYZ sensitivity joints can remain near-static by geometry (J6 is orientation-only).'
       ];
@@ -2310,7 +2359,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         },
         ikDiagnostics: {
           attempts: primaryEndpoint.attempts.length,
-          bestStage: endpointSolved.stage,
+          bestStage: endpointSolved?.stage || 'path_interpolation',
           bestResidualMm: (successfulIk?.quality?.positionResidualM ?? 0) * 1000,
           branchId: successfulIk?.quality?.branchId || (reachabilityProbe.branchId || 'unknown'),
           seedIndex: successfulIk?.quality?.seedIndex ?? -1
