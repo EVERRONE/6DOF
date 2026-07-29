@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { Vector3 } from '../kinematics/types';
+import { computeWorkspaceBounds } from '../kinematics/InverseKinematics';
 
 /**
  * Cartesian Control Panel Component
@@ -11,7 +12,6 @@ import { Vector3 } from '../kinematics/types';
 export const CartesianControlPanel: React.FC = () => {
   const {
     currentPosition,
-    targetPosition,
     setTargetPosition,
     moveToPosition,
     motorsEnabled,
@@ -24,12 +24,18 @@ export const CartesianControlPanel: React.FC = () => {
   const [inputY, setInputY] = useState<string>('0');
   const [inputZ, setInputZ] = useState<string>('0');
 
-  // Workspace limits (in meters)
-  const WORKSPACE_LIMITS = {
-    x: { min: -0.3, max: 0.3 },
-    y: { min: -0.3, max: 0.3 },
-    z: { min: 0.0, max: 0.4 }
-  };
+  // Workspace limits, derived from the actual kinematic model and the
+  // mechanical joint limits rather than guessed. This is the axis-aligned outer
+  // bound of the reachable set, so a point inside the box is not guaranteed to
+  // be reachable - the IK result is the authority on that.
+  const WORKSPACE_LIMITS = useMemo(() => {
+    const bounds = computeWorkspaceBounds(9);
+    return {
+      x: { min: bounds.min.x, max: bounds.max.x },
+      y: { min: bounds.min.y, max: bounds.max.y },
+      z: { min: bounds.min.z, max: bounds.max.z }
+    };
+  }, []);
 
   // Update input fields when current position changes
   useEffect(() => {
@@ -57,16 +63,24 @@ export const CartesianControlPanel: React.FC = () => {
       y < WORKSPACE_LIMITS.y.min || y > WORKSPACE_LIMITS.y.max ||
       z < WORKSPACE_LIMITS.z.min || z > WORKSPACE_LIMITS.z.max
     ) {
+      const range = (axis: { min: number; max: number }) =>
+        `${(axis.min * 1000).toFixed(0)} to ${(axis.max * 1000).toFixed(0)} mm`;
       alert(
-        `Position out of workspace bounds!\n` +
-        `X: ${WORKSPACE_LIMITS.x.min * 1000} to ${WORKSPACE_LIMITS.x.max * 1000} mm\n` +
-        `Y: ${WORKSPACE_LIMITS.y.min * 1000} to ${WORKSPACE_LIMITS.y.max * 1000} mm\n` +
-        `Z: ${WORKSPACE_LIMITS.z.min * 1000} to ${WORKSPACE_LIMITS.z.max * 1000} mm`
+        `Position outside the reachable workspace!\n` +
+        `X: ${range(WORKSPACE_LIMITS.x)}\n` +
+        `Y: ${range(WORKSPACE_LIMITS.y)}\n` +
+        `Z: ${range(WORKSPACE_LIMITS.z)}`
       );
       return;
     }
 
     const position: Vector3 = { x, y, z };
+
+    // Publish the target so the 3D viewer can draw its target marker. Without
+    // this the marker existed but was never given a position, so it stayed
+    // permanently hidden.
+    setTargetPosition(position);
+
     await moveToPosition(position);
   };
 
@@ -128,7 +142,7 @@ export const CartesianControlPanel: React.FC = () => {
               disabled={!isConnected}
             />
             <span className="text-xs text-gray-400">
-              {WORKSPACE_LIMITS.x.min * 1000} to {WORKSPACE_LIMITS.x.max * 1000}
+              {(WORKSPACE_LIMITS.x.min * 1000).toFixed(0)} to {(WORKSPACE_LIMITS.x.max * 1000).toFixed(0)}
             </span>
           </div>
 
@@ -144,7 +158,7 @@ export const CartesianControlPanel: React.FC = () => {
               disabled={!isConnected}
             />
             <span className="text-xs text-gray-400">
-              {WORKSPACE_LIMITS.y.min * 1000} to {WORKSPACE_LIMITS.y.max * 1000}
+              {(WORKSPACE_LIMITS.y.min * 1000).toFixed(0)} to {(WORKSPACE_LIMITS.y.max * 1000).toFixed(0)}
             </span>
           </div>
 
@@ -160,7 +174,7 @@ export const CartesianControlPanel: React.FC = () => {
               disabled={!isConnected}
             />
             <span className="text-xs text-gray-400">
-              {WORKSPACE_LIMITS.z.min * 1000} to {WORKSPACE_LIMITS.z.max * 1000}
+              {(WORKSPACE_LIMITS.z.min * 1000).toFixed(0)} to {(WORKSPACE_LIMITS.z.max * 1000).toFixed(0)}
             </span>
           </div>
         </div>
@@ -204,8 +218,10 @@ export const CartesianControlPanel: React.FC = () => {
       {/* Help Text */}
       <div className="mt-3 text-xs text-gray-500">
         <p>
-          <strong>Note:</strong> Inverse kinematics may not always find a solution,
-          especially near workspace boundaries or singularities.
+          <strong>Note:</strong> the ranges above are the outer bounds of the
+          reachable workspace, so a point inside them can still be unreachable -
+          the arm is tightly limited on J1 and J2. If IK reports a residual, the
+          target is out of reach from the current arm configuration.
         </p>
       </div>
     </div>

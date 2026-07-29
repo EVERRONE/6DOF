@@ -1,486 +1,482 @@
 # Kinematics Documentation
 
-**6DOF Robot Arm - Forward and Inverse Kinematics**
+**6DOF Robot Arm — Forward and Inverse Kinematics**
 
 ---
 
 ## Overview
 
-This document describes the kinematics implementation for the 6DOF robot arm, including:
-- Forward Kinematics (FK): Joint angles → Cartesian position
-- Inverse Kinematics (IK): Cartesian position → Joint angles
-- DH parameter derivation from URDF
-- Usage examples and troubleshooting
+This document describes the kinematics implementation for the 6DOF robot arm:
+
+- Forward Kinematics (FK): joint angles → Cartesian pose
+- Inverse Kinematics (IK): Cartesian pose → joint angles
+- How the kinematic chain is derived from the URDF
+- Usage, validation and troubleshooting
+
+### Files
+
+| File | Responsibility |
+|------|----------------|
+| `src/kinematics/robotModel.ts` | The kinematic chain and joint limits. Single source of truth. |
+| `src/kinematics/linalg.ts` | 4×4 transforms, rotation utilities, Cholesky solver. |
+| `src/kinematics/ForwardKinematics.ts` | FK and the analytic geometric Jacobian. |
+| `src/kinematics/InverseKinematics.ts` | Damped least squares IK, workspace bounds. |
+| `src/kinematics/kinematics.test.ts` | Test suite, including FK-vs-viewer agreement. |
 
 ---
 
-## Coordinate Systems
+## Unit convention
 
-### Joint Space
-- **Representation:** 6 joint angles [J1, J2, J3, J4, J5, J6]
-- **Units:** Degrees
-- **Range:** Defined by `jointLimits` in URDF
+Getting this wrong silently was the cause of several past bugs, so it is stated
+explicitly and enforced by the function names:
 
-### Cartesian Space
-- **Representation:** Position (X, Y, Z) + Orientation (Roll, Pitch, Yaw)
-- **Units:** Meters for position, radians for orientation
-- **Origin:** Robot base center (linkB)
-- **Axes:**
-  - X: Forward/backward
-  - Y: Left/right
-  - Z: Up/down (vertical)
+| Where | Angles | Lengths |
+|-------|--------|---------|
+| Public API (`solve`, `solvePosition`, `solvePose`) | **degrees** | metres |
+| Everything internal (`solveRad`, `jacobianRad`, the solver loop) | **radians** | metres |
+| Jacobian entries | per **radian** | metres |
+
+Functions that cross the boundary say so in their doc comment. There is no
+implicit conversion anywhere else.
 
 ---
 
-## DH Parameters
+## Coordinate systems
 
-The robot uses **Modified DH Convention (Craig)**:
+### Joint space
 
-| Joint | α (deg) | a (mm) | d (mm) | θ | Notes |
-|-------|---------|--------|--------|---|-------|
-| J1    | 0       | 0      | 80.0   | q₁ | Base rotation |
-| J2    | -90     | 42.5   | 55.95  | q₂ | Shoulder pitch |
-| J3    | -180    | 160.0  | 16.0   | q₃ | Elbow pitch |
-| J4    | -90     | 38.1   | 36.4   | q₄+90° | Wrist roll |
-| J5    | -90     | 10.02  | 103.23 | q₅+90° | Wrist pitch |
-| J6    | 90      | 26.77  | 9.94   | q₆-90° | Tool rotation |
+- Representation: 6 joint angles `[J1, J2, J3, J4, J5, J6]`
+- Units: degrees at the API boundary
+- Range: `JOINT_LIMITS_DEG` in `robotModel.ts`, mirroring `firmware/config.h`
 
-**Parameters:**
-- **α (alpha):** Twist angle about X_{i-1}
-- **a:** Link length along X_{i-1}
-- **d:** Link offset along Z_i
-- **θ (theta):** Joint angle about Z_i (variable)
+### Cartesian space
 
----
+- Representation: position (X, Y, Z) + orientation (roll, pitch, yaw)
+- Units: metres, radians
+- Origin: robot base centre (`linkB`)
+- Z is vertical (up), X forward, Y follows the right-hand rule
 
-## Forward Kinematics
-
-### Algorithm
-
-1. Convert joint angles from degrees to radians
-2. Create DH transformation matrix for each joint:
-   ```
-   T_i = Rot_X(α) · Trans_X(a) · Rot_Z(θ) · Trans_Z(d)
-   ```
-3. Multiply matrices: `T = T₁ · T₂ · T₃ · T₄ · T₅ · T₆`
-4. Extract position from translation vector: `[T₁₄, T₂₄, T₃₄]`
-5. Extract orientation from rotation matrix: `[T₁₁..T₃₃]`
-
-### Transformation Matrix
+Orientation uses the **URDF fixed-axis rpy convention**:
 
 ```
-      ┌                                          ┐
-      │  cos(θ)    -sin(θ)      0           a    │
-T_i = │  sin(θ)cos(α)  cos(θ)cos(α)  -sin(α)  -d·sin(α) │
-      │  sin(θ)sin(α)  cos(θ)sin(α)   cos(α)   d·cos(α) │
-      │     0          0          0           1    │
-      └                                          ┘
+R = Rz(yaw) · Ry(pitch) · Rx(roll)
 ```
 
-### Code Example
+which is what `THREE.Euler` expresses with order `'ZYX'`. The 3D viewer uses
+that same order, so the viewer and the kinematics agree by construction.
+
+---
+
+## The kinematic chain
+
+**No DH parameters are used.** The transforms are composed straight from the
+URDF joint origins. For each joint *i*:
+
+```
+T_i = Translate(origin.xyz) · Rz(yaw) · Ry(pitch) · Rx(roll) · Rz(q_i)
+      └────────── fixed offset from the parent frame ──────────┘  └ joint ┘
+```
+
+and the pose of frame *i* in base coordinates is the running product
+`T_0→i = T_1 · T_2 · … · T_i`. Every joint of this arm rotates about its own
+local Z axis (URDF `axis="0 0 1"`), which is why no per-joint axis handling is
+needed.
+
+### Why not DH
+
+A DH table cannot be read off URDF origins component by component; converting
+between the two requires a proper frame-alignment algorithm. An earlier version
+of this code guessed at it (`a = sqrt(x² + y²)`, `d = z`, taking a Y component
+as a link length) and produced a chain that disagreed with the actual robot by
+**330–500 mm** — on an arm whose total reach is about 370 mm. IK therefore
+solved for a robot that did not exist.
+
+Composing the URDF transforms directly is exact, shorter, and cannot drift out
+of sync with the 3D viewer. The test suite asserts that agreement to within
+1e-9 m over 500 random poses.
+
+### Chain
+
+```
+linkB (base plate)
+  ↓ J1  link0_joint   xyz=( 0.0,      0.0,     0.08   )  rpy=( 0,       0,      0      )
+link0 (base wall)
+  ↓ J2  Joint2        xyz=(-0.0375,   0.02,    0.05595)  rpy=(-1.5708,  0,      0      )
+link1 (arm 1)
+  ↓ J3  Joint3        xyz=( 0.00027, -0.16,    0.016  )  rpy=(-3.14159, 0,      0      )
+link2 (arm 2 mount)
+  ↓ J4  link3_joint   xyz=(-0.035,    0.0151,  0.0364 )  rpy=(-1.5708,  0,      1.5708 )
+link3 (rotation arm)
+  ↓ J5  Joint5        xyz=( 0.0,     -0.01002, 0.10323)  rpy=(-1.5708,  1.5708, 0      )
+link4 (J6 housing)
+  ↓ J6  Joint6        xyz=(-0.02677,  0.0,     0.00994)  rpy=( 1.5708,  0,     -1.5708 )
+link5 (end effector)
+```
+
+### Tool centre point
+
+`TOOL_OFFSET` in `robotModel.ts` is the TCP expressed in frame 6. It is
+currently `(0, 0, 0)`, which puts the TCP at the origin of frame 6 — exactly
+where the 3D viewer attaches its end-effector axes marker. Set it once the real
+gripper geometry is known, and FK, IK and the viewer all follow.
+
+---
+
+## Joint limits
+
+The limits come from `firmware/config.h` (`JOINT_MIN` / `JOINT_MAX`), because
+those are the mechanically valid hard stops and the firmware enforces them
+regardless of what the app asks for.
+
+| Joint | Min | Max | Reduction |
+|-------|-----|-----|-----------|
+| J1 | −40° | 30° | 6.3 : 1 |
+| J2 | 0° | 60° | 25 : 1 |
+| J3 | 0° | 70° | 6.3 : 1 |
+| J4 | 0° | 274° | 3.7 : 1 |
+| J5 | 0° | 280° | 2 : 1 |
+| J6 | −360° | 360° | 1 : 1 |
+
+> **Keep these in step with `firmware/config.h`.** If the solver works in a
+> different box than the firmware, the firmware silently clamps the solution and
+> the arm ends up somewhere the solver never asked for. `kinematics.test.ts`
+> asserts the exact values so a drift fails the suite.
+
+The URDF's own limits (±160/±74/±120/±143/±143) are **not** used: they are
+symmetric placeholders, and the documented post-homing pose `J5 = 220°` falls
+outside them.
+
+Note also that J6 must never be given a zero-width range. The URDF marks it
+`continuous` with a `limit` block of `{lower: 0, upper: 0}`; an earlier version
+accepted that literally and froze the joint, costing the solver a degree of
+freedom.
+
+---
+
+## Forward kinematics
+
+### Usage
 
 ```typescript
 import { ForwardKinematics } from './kinematics/ForwardKinematics';
 
-// Joint angles in degrees
-const jointAngles = [0, 20, 30, 0, 0, 0];
-
-// Solve FK
-const result = ForwardKinematics.solve(jointAngles);
+// Joint angles in DEGREES
+const result = ForwardKinematics.solve([0, 20, 30, 0, 0, 0]);
 
 if (result.success) {
-  const pos = result.endEffectorPose.position;
-  console.log(`Position: X=${pos.x}m, Y=${pos.y}m, Z=${pos.z}m`);
-
-  const rot = result.endEffectorPose.rotation;
-  console.log(`Orientation: Roll=${rot.roll}, Pitch=${rot.pitch}, Yaw=${rot.yaw}`);
+  const { position, rotation } = result.endEffectorPose;
+  console.log(`X=${position.x} Y=${position.y} Z=${position.z} m`);
+  console.log(`roll=${rotation.roll} pitch=${rotation.pitch} yaw=${rotation.yaw} rad`);
+  // result.jointTransforms[i] is the 4x4 pose of joint frame i
 }
 ```
 
+Convenience entry points:
+
+```typescript
+ForwardKinematics.position(anglesDeg);      // Vector3, TCP position only
+ForwardKinematics.jointOrigins(anglesDeg);  // every frame origin + the TCP
+ForwardKinematics.reachAt(anglesDeg);       // distance from the base origin
+ForwardKinematics.toolToBase(anglesDeg, p); // tool coords -> base coords
+ForwardKinematics.solveRad(anglesRad);      // radians, no error wrapping
+```
+
+`solve` validates its input and returns `success: false` with a reason for a
+wrong array length or a non-finite value, rather than quietly returning the
+origin.
+
 ### Performance
 
-- **Computation time:** < 1ms
-- **Update rate:** Real-time capable (>100 Hz)
-- **Dependencies:** Pure JavaScript (no external math libs)
+Pure JavaScript, no external math libraries. One FK evaluation is six 4×4
+multiplications; the suite runs several thousand per second in jsdom.
 
 ---
 
-## Inverse Kinematics
+## The Jacobian
 
-### Algorithm: Damped Least Squares (DLS)
+`ForwardKinematics.jacobianRad(q)` returns the **analytic geometric Jacobian**,
+a 6×6 matrix in base coordinates:
 
-Iterative numerical method that solves:
+- rows 0–2: joint velocity → linear TCP velocity (m/rad)
+- rows 3–5: joint velocity → angular TCP velocity (rad/rad)
+
+For a revolute joint with world-frame axis `z_i` through point `p_i`:
 
 ```
-Δq = (J^T·J + λ²I)^(-1) · J^T · e
+linear  column i = z_i × (p_tcp − p_i)
+angular column i = z_i
 ```
 
-Where:
-- `J` = Jacobian matrix (∂FK/∂q)
-- `e` = Position/pose error
-- `λ` = Damping factor (singularity avoidance)
-- `Δq` = Joint angle update
+Both `z_i` and `p_i` are read straight off the joint frame, because `Rz(q_i)`
+changes neither the frame's Z axis nor its origin.
 
-**Iteration Steps:**
-1. Compute FK with current joint angles
-2. Calculate error: `e = target - current`
-3. Compute Jacobian numerically
-4. Solve for `Δq` using damped pseudo-inverse
-5. Update: `q ← q + Δq`
-6. Check convergence or max iterations
-7. Repeat from step 1
+This costs a single FK pass instead of the seven a numerical difference needs,
+and carries no truncation noise. The test suite checks it against a central
+difference to within 1e-7.
+
+> The angular rows are a genuine angular velocity, not a rate of change of Euler
+> angles. Those are different quantities, and Euler rates are singular at
+> gimbal lock.
+
+---
+
+## Inverse kinematics
+
+### Method
+
+Damped least squares with Levenberg-Marquardt damping. Each iteration solves
+
+```
+(JᵀJ + λ²I) Δq = Jᵀe
+```
+
+with four properties that matter:
+
+1. **Scale-aware damping.** `λ² = dampingRel · max(diag(JᵀJ)) + floor`, so the
+   damping is always proportional to the Jacobian's own magnitude. A fixed λ²
+   cannot work: with the Jacobian expressed per degree, a λ² tuned for radians
+   ended up 7× larger than the largest signal term and the steps collapsed to
+   nothing.
+2. **Cholesky factorisation** of the normal equations, with failure reported so
+   the caller can raise the damping and retry. `JᵀJ + λ²I` is symmetric positive
+   definite for λ > 0 but is *not* diagonally dominant here, so an iterative
+   Gauss-Seidel sweep is not guaranteed to converge on it.
+3. **Joint limits inside the solve.** A joint that the step would push further
+   past a limit is locked out and the system re-solved so the remaining joints
+   compensate. Clamping the step afterwards instead just discards the
+   correction and stalls the solver against the limit.
+4. **Adaptive trust region.** A step that increases the cost is rejected and
+   retried with more damping; a step that works reduces the damping. Step size
+   is capped at `maxStepRad` because a Jacobian is only a local linearisation.
+
+Orientation error is the matrix logarithm of `R_target · R_currentᵀ` — the
+rotation that still has to happen, as an axis-angle vector. Differencing Euler
+triples, as an earlier version did, wraps at ±π and breaks down at gimbal lock.
+
+If a seed does not converge, the solver restarts from the next one:
+the caller's pose first (so nearby solutions win and the arm does not
+reconfigure unnecessarily), then the home pose, the mid-range pose, and
+deterministic low-discrepancy samples. Deterministic means a given target
+always yields the same solution.
 
 ### Configuration
 
 ```typescript
-const ikConfig = {
-  maxIterations: 100,     // Maximum iterations before giving up
-  tolerance: 0.001,       // Position error tolerance (meters)
-  dampingFactor: 0.01,    // Damping λ (higher = more stable, slower)
-  jointLimits: {          // Enforce joint limits
-    min: [-2.8, -1.3, -2.1, -2.5, -2.5, -6.28],
-    max: [2.8, 1.3, 2.1, 2.5, 2.5, 6.28]
-  }
-};
+import { InverseKinematics, DEFAULT_IK_OPTIONS } from './kinematics/InverseKinematics';
+
+const ikSolver = new InverseKinematics({
+  maxIterations: 150,          // per seed attempt
+  positionTolerance: 0.0005,   // 0.5 mm
+  orientationTolerance: 0.0087,// 0.5 deg, pose solves only
+  orientationScale: 0.05,      // 1 rad counts like 50 mm when minimising both
+  maxStepRad: 0.35,            // ~20 deg per iteration
+  maxSeeds: 6
+});
 ```
 
-### Code Example
+There is no `dampingFactor` to tune — the damping is adaptive.
+
+### Usage
 
 ```typescript
-import { InverseKinematics } from './kinematics/InverseKinematics';
-
-const ikSolver = new InverseKinematics();
-
-// Target position in meters
-const targetPosition = {
-  x: 0.20,  // 200mm forward
-  y: 0.10,  // 100mm left
-  z: 0.25   // 250mm up
-};
-
-// Initial guess (use current position for better convergence)
-const initialGuess = [0, 20, 30, 0, 0, 0];
-
-// Solve IK
-const result = ikSolver.solvePosition(targetPosition, initialGuess);
+// Position only, orientation free
+const result = ikSolver.solvePosition(
+  { x: -0.12, y: -0.01, z: 0.22 },  // metres
+  currentAnglesDeg                   // seed, degrees
+);
 
 if (result.success) {
-  console.log('Joint angles:', result.jointAngles);
-  console.log('Converged in', result.iterations, 'iterations');
-  console.log('Final error:', result.residualError * 1000, 'mm');
+  console.log('Joint angles (deg):', result.jointAngles);
+  console.log('Iterations:', result.iterations);
+  console.log('Residual:', result.residualError * 1000, 'mm');
 } else {
-  console.error('IK failed:', result.error);
+  // jointAngles still holds the best pose found, always inside the limits
+  console.error(result.error);
 }
+
+// Position and orientation
+const posed = ikSolver.solvePose(
+  { position: { x: -0.12, y: -0.01, z: 0.22 }, rotation: { roll: 0, pitch: 0, yaw: 0 } },
+  currentAnglesDeg
+);
 ```
 
-### When to Use Position vs Pose IK
+`result.jointAngles` is in **degrees** and is **always inside the mechanical
+limits**, whether or not the solve converged.
 
-**Position-Only IK** (`solvePosition`):
-- Faster convergence
-- Only cares about XYZ location
-- Orientation is free to vary
-- **Use for:** Pick-and-place, drawing, general positioning
+### Position vs pose
 
-**Full Pose IK** (`solvePose`):
-- Slower convergence
-- Controls both position and orientation
-- More constraints = harder to solve
-- **Use for:** Precise tool alignment, assembly tasks
+**`solvePosition`** — converges more easily, leaves orientation free. Use for
+pick-and-place, drawing, general positioning.
 
-### Performance
+**`solvePose`** — constrains all six degrees of freedom. Use for tool
+alignment. Harder to satisfy on this arm: with J2 limited to 0–60° and J3 to
+0–70°, not every orientation is attainable at every point.
 
-- **Average iterations:** 15-30
-- **Computation time:** 50-200ms
-- **Success rate:** ~90% within workspace
-- **Convergence tolerance:** 1mm
+### Measured behaviour
+
+Over 400 targets generated by FK from random poses inside the joint limits, so
+every target is reachable by construction:
+
+| Metric | Result |
+|--------|--------|
+| Position-only convergence | > 99% |
+| Full-pose convergence | > 90% |
+| Worst position residual on success | < 0.5 mm |
+| Solutions outside joint limits | 0 |
+
+These are asserted in `kinematics.test.ts`, so a regression fails the suite.
 
 ---
 
-## Workspace Analysis
+## Workspace
 
-### Reachable Workspace
+`computeWorkspaceBounds()` samples the joint space and returns the axis-aligned
+outer bound of the reachable TCP positions. Measured with the firmware joint
+limits:
 
-Approximate workspace bounds (from base origin):
+| Axis | Min | Max |
+|------|-----|-----|
+| X | −203 mm | +70 mm |
+| Y | −115 mm | +138 mm |
+| Z | +146 mm | +384 mm |
 
-| Axis | Minimum | Maximum | Notes |
-|------|---------|---------|-------|
-| X    | -300mm  | +300mm  | Forward/back |
-| Y    | -300mm  | +300mm  | Left/right |
-| Z    | 0mm     | 400mm   | Height above base |
+The workspace is small and strongly off-centre because J1 only travels −40…30°
+and J2 only 0…60°. `CartesianControlPanel` derives its input ranges from this
+function rather than hardcoding them.
 
-**Shape:** Roughly toroidal (donut-shaped) due to J2/J3 reach
+**The bounding box is an outer bound, not the reachable set.** A point inside
+the box can still be unreachable. The IK result is the authority.
 
 ### Singularities
 
-Configurations where IK may fail or behave poorly:
+Configurations where the Jacobian loses rank:
 
-1. **Shoulder singularity:** J2 and J3 aligned (fully extended or retracted)
-2. **Elbow singularity:** J3 = 0° (straight arm)
-3. **Wrist singularity:** J5 = 0° (wrist axes aligned)
+1. **Shoulder** — J2 and J3 aligned (fully extended or fully retracted)
+2. **Elbow** — arm straight
+3. **Wrist** — J4 and J6 axes aligned (J5 at either end of its travel)
 
-**Avoidance:**
-- Stay away from fully extended configurations
-- Use non-zero J5 angles when possible
-- Increase damping factor near singularities
+The adaptive damping handles these: near a singularity the cost stops improving,
+the damping rises, and the step shortens instead of exploding. The solver will
+not produce a wild joint jump at a singularity, though it may not reach a target
+that requires passing exactly through one.
 
 ---
 
-## Testing and Validation
+## Validation
 
-### Round-Trip Test
-
-Verifies FK and IK are consistent:
-
-```typescript
-import { runTestsInConsole } from './kinematics/testKinematics';
-
-// Run in browser console
-runTestsInConsole();
+```bash
+cd robot-arm-control
+CI=true npx react-scripts test --watchAll=false --testPathPattern=kinematics
 ```
 
-**Expected Results:**
-- Position error: < 1mm
-- Joint error: < 5°
-- Success rate: > 80%
+The suite covers:
 
-### Test Cases
+- **FK vs the 3D viewer** — rebuilds the chain with nested `THREE.Group` nodes
+  the way `RobotModel3D` does and compares, over 500 random poses. This is the
+  invariant that the old DH implementation violated, and it is the single most
+  useful test in the file.
+- **Jacobian vs central difference** — position and angular rows separately.
+- **IK convergence rate, residuals, and limit compliance** on reachable targets.
+- **Round trip** — `FK(IK(p)) ≈ p`.
+- **Edge cases** — target already reached, unreachable target, non-finite input,
+  seed outside the joint limits, gimbal-lock orientations.
+- **Rotation utilities** — rpy round trip, and `rotationLog` near 0 and near
+  180°, where `acos` loses half its precision (hence the `atan2` formulation).
 
-The test suite includes:
-1. Home position (zeros)
-2. Single joint movements
-3. Multi-joint combinations
-4. Edge cases (near limits)
-5. Maximum reach positions
+### Manual validation on the arm
 
-### Manual Validation
+1. Home the robot and read the reported joint angles.
+2. Read the XYZ shown in the StatusBar.
+3. Type the same XYZ into the Cartesian panel and press *Move to Position*.
+4. The arm should barely move; IK should report a residual well under 1 mm.
 
-1. Move robot to known position (e.g., home)
-2. Read XYZ from StatusBar
-3. Enter same XYZ in Cartesian control
-4. Click "Move to Position"
-5. Robot should stay in same position (minimal movement)
+If step 4 moves the arm significantly, the reported joint angles do not match
+the physical pose — check the homing bookkeeping in the firmware before
+suspecting the kinematics.
 
 ---
 
-## Usage in Web Application
+## Usage in the web application
 
-### Automatic FK Updates
-
-Forward kinematics runs automatically whenever joint angles change:
+FK runs whenever a position report arrives:
 
 ```typescript
-// In robotStore.ts
+// robotStore.ts
 manager.onMessage((msg) => {
   if (msg.type === 'POS') {
     set({ currentAngles: msg.data });
-    get().updateCurrentPosition(); // ← Automatic FK
+    get().updateCurrentPosition(); // FK
   }
 });
 ```
 
-Result displayed in StatusBar:
-```
-Position: X:123.4mm Y:56.7mm Z:234.5mm
-```
-
-### Cartesian Control Panel
-
-Located in left panel above joint controls:
-
-**Features:**
-- Current XYZ display (real-time from FK)
-- Target XYZ input fields (mm)
-- Workspace limit indicators
-- "Move to Position" button (triggers IK)
-- IK status feedback (success/failure, iterations, error)
-
-**Workflow:**
-1. Enter target X, Y, Z coordinates (mm)
-2. Click "Move to Position"
-3. IK solver computes joint angles
-4. If successful, robot moves to target
-5. If failed, error message displayed
-
----
-
-## Coordinate Frame Visualization
-
-```
-         Z↑
-          |
-          |
-    ┌─────┴─────┐
-    │   Base    │
-    │  (linkB)  │
-    └───────────┘
-         / \
-        /   \
-       /     \
-Y ←───┘       └───→ X
-```
-
-**Base Frame (World):**
-- Origin: Center of base plate
-- Z-axis: Vertical (up)
-- X-axis: Forward (front of robot)
-- Y-axis: Left (follows right-hand rule)
+The Cartesian panel shows the current XYZ, takes a target in mm, calls
+`moveToPosition` (which runs IK and sends a `J` command), and reports the IK
+outcome including the residual.
 
 ---
 
 ## Troubleshooting
 
-### IK Not Converging
+### IK reports "target not reachable within tolerance"
 
-**Problem:** "Failed to converge" error
+The message includes the best residual found. Check in this order:
 
-**Solutions:**
-1. Check if target is within workspace bounds
-2. Use better initial guess (current position)
-3. Increase `maxIterations` to 200
-4. Increase `dampingFactor` to 0.05 (more stable)
-5. Relax `tolerance` to 0.002 (2mm)
+1. Is the target inside the workspace table above? Remember it is an outer
+   bound — a point inside it can still be out of reach.
+2. Is the seed sensible? Passing the current pose helps, though the solver will
+   restart from other seeds on its own.
+3. Is the orientation over-constraining it? Try `solvePosition` instead of
+   `solvePose`.
+4. Raise `positionTolerance` if 0.5 mm is stricter than the arm's mechanical
+   repeatability warrants.
 
-### IK Converges to Wrong Solution
+Raising `maxIterations` rarely helps: when a seed stops improving the solver
+abandons it deliberately and restarts, which is more productive than grinding.
 
-**Problem:** Robot takes unexpected path
+### FK position does not match the real arm
 
-**Cause:** Multiple IK solutions exist (robot is redundant for position-only)
+The kinematics agree with the URDF and the 3D viewer — the test suite proves
+that. So a mismatch against the physical arm points at one of:
 
-**Solutions:**
-1. Use current position as initial guess (stays close)
-2. Add orientation constraints (use `solvePose` instead)
-3. Manually specify preferred configuration
+1. **Position bookkeeping in the firmware.** Verify the reported angles
+   actually correspond to the physical pose after homing.
+2. **Stepper calibration** — `USTEPS_PER_DEG` in `config.h`.
+3. **The URDF itself** — if a link length in `URDF.md` is wrong, FK inherits it.
+4. **Mechanical backlash**, which no amount of modelling fixes.
 
-### Position Accuracy Low
+### IK picks an unexpected configuration
 
-**Problem:** FK position doesn't match real robot
-
-**Causes:**
-- DH parameters incorrect
-- Stepper calibration wrong (`USTEPS_PER_DEG`)
-- Mechanical play in joints
-
-**Solutions:**
-1. Verify DH parameters match URDF
-2. Re-calibrate stepper ratios in `config.h`
-3. Re-home robot to reset zero positions
-4. Check for mechanical issues
-
-### Workspace Limits Too Restrictive
-
-**Problem:** Reachable positions rejected
-
-**Solution:** Adjust limits in `CartesianControlPanel.tsx`:
-
-```typescript
-const WORKSPACE_LIMITS = {
-  x: { min: -0.35, max: 0.35 },  // Expand from ±300mm to ±350mm
-  y: { min: -0.35, max: 0.35 },
-  z: { min: 0.0, max: 0.45 }     // Expand from 400mm to 450mm
-};
-```
-
----
-
-## Advanced Topics
-
-### Jacobian Matrix
-
-The Jacobian maps joint velocities to end-effector velocities:
-
-```
-v = J · q̇
-```
-
-Where:
-- `v` = [vₓ, vᵧ, vᵤ, ωₓ, ωᵧ, ωᵤ]ᵀ (twist vector)
-- `J` = 6×6 Jacobian matrix
-- `q̇` = [q̇₁, q̇₂, q̇₃, q̇₄, q̇₅, q̇₆]ᵀ (joint velocities)
-
-**Computed numerically:**
-```typescript
-const J = ForwardKinematics.computeJacobian(jointAngles);
-```
-
-**Uses:**
-- Inverse kinematics (DLS method)
-- Velocity control
-- Singularity detection (det(J) ≈ 0)
-- Manipulability analysis
-
-### Singularity Detection
-
-```typescript
-function isSingular(J: number[][]): boolean {
-  const det = computeDeterminant(J);
-  return Math.abs(det) < 1e-3;
-}
-```
-
-If singular, increase damping or avoid configuration.
-
-### Alternative IK Methods
-
-Current implementation uses **Damped Least Squares (DLS)**.
-
-**Other options:**
-- **Analytical IK:** Faster but complex (requires geometry analysis)
-- **CCD (Cyclic Coordinate Descent):** Simpler but less accurate
-- **Jacobian Transpose:** Faster but slower convergence
-- **Optimization-based:** Global minimum but very slow
-
-DLS chosen for balance of speed, accuracy, and robustness.
+Position-only IK is redundant on a 6-joint arm — many solutions exist. Pass the
+current pose as the seed so the nearest solution wins, or constrain orientation
+with `solvePose`.
 
 ---
 
 ## References
 
 ### Books
+
 - Craig, J. J. (2005). *Introduction to Robotics: Mechanics and Control* (3rd ed.)
 - Siciliano, B., & Khatib, O. (2016). *Springer Handbook of Robotics* (2nd ed.)
-- Spong, M. W., Hutchinson, S., & Vidyasagar, M. (2006). *Robot Modeling and Control*
+- Lynch, K. M., & Park, F. C. (2017). *Modern Robotics: Mechanics, Planning, and Control*
 
 ### Papers
+
 - Nakamura, Y., & Hanafusa, H. (1986). "Inverse Kinematic Solutions With Singularity Robustness for Robot Manipulator Control"
 - Buss, S. R. (2004). "Introduction to Inverse Kinematics with Jacobian Transpose, Pseudoinverse and Damped Least Squares methods"
+- Wampler, C. W. (1986). "Manipulator Inverse Kinematic Solutions Based on Vector Formulations and Damped Least-Squares Methods"
 
-### Online Resources
+### Online
+
 - [Modern Robotics (Northwestern)](http://modernrobotics.org/)
-- [ROS MoveIt! Kinematics](http://docs.ros.org/en/kinetic/api/moveit_tutorials/)
+- [ROS MoveIt! kinematics](https://moveit.ai/documentation/)
 
 ---
 
-## Appendix: URDF Kinematic Chain
+**See also:**
 
-```xml
-linkB.000 (fixed world frame)
-  ↓ (fixed joint)
-linkB (base plate)
-  ↓ (J1: link0_joint, revolute, Z-axis)
-link0 (base wall)
-  ↓ (J2: Joint2, revolute, Z-axis)
-link1 (arm 1)
-  ↓ (J3: Joint3, revolute, Z-axis)
-link2 (arm 2 mount)
-  ↓ (J4: link3_joint, revolute, Z-axis)
-link3 (rotation arm)
-  ↓ (J5: Joint5, revolute, Z-axis)
-link4 (J6 housing)
-  ↓ (J6: Joint6, continuous, Z-axis)
-link5 (end-effector)
-```
-
-**Joint Limits (from URDF):**
-- J1: ±2.8 rad (±160°)
-- J2: ±1.3 rad (±74°)
-- J3: ±2.1 rad (±120°)
-- J4: ±2.5 rad (±143°)
-- J5: ±2.5 rad (±143°)
-- J6: Continuous (no limits)
-
----
-
-**For further assistance, refer to:**
-- [PHASE_2_COMPLETE.md](../PHASE_2_COMPLETE.md) - Implementation details
-- [URDF.md](../URDF.md) - Robot structure definition
-- [testKinematics.ts](../robot-arm-control/src/kinematics/testKinematics.ts) - Validation tests
+- [URDF.md](../URDF.md) — robot structure definition
+- [SERIAL_PROTOCOL.md](SERIAL_PROTOCOL.md) — how joint targets reach the firmware
+- `firmware/config.h` — joint limits and stepper calibration

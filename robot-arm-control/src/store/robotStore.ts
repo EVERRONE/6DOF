@@ -78,12 +78,9 @@ interface RobotStore {
   importPath: (savedPath: SavedPath) => boolean;
 }
 
-// Create IK solver instance
-const ikSolver = new InverseKinematics({
-  maxIterations: 100,
-  tolerance: 0.001,
-  dampingFactor: 0.01
-});
+// Create IK solver instance. Defaults come from DEFAULT_IK_OPTIONS; the
+// damping is adaptive, so there is no fixed factor to tune here.
+const ikSolver = new InverseKinematics();
 
 // Trajectory planner instance
 let trajectoryPlanner = new TrajectoryPlanner();

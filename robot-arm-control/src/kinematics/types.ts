@@ -1,7 +1,16 @@
-// Kinematics type definitions for 6DOF robot arm
+// Kinematics type definitions for the 6DOF robot arm.
+//
+// Unit convention, applied everywhere:
+//   - Positions and lengths: metres
+//   - Angles inside the kinematics core: radians
+//   - Angles at the public API boundary (FK input, IK output): degrees
+//
+// The degrees/radians boundary is spelled out on every function that crosses
+// it. Mixing the two silently was the cause of several bugs in the previous
+// implementation.
 
 /**
- * 3D Vector (position or direction)
+ * 3D Vector (position or direction), metres.
  */
 export interface Vector3 {
   x: number;
@@ -10,16 +19,20 @@ export interface Vector3 {
 }
 
 /**
- * 3D Rotation (Euler angles in radians)
+ * Orientation as fixed-axis roll/pitch/yaw in radians, the URDF convention:
+ *   R = Rz(yaw) * Ry(pitch) * Rx(roll)
+ *
+ * This is the same convention THREE.Euler expresses with order 'ZYX', which is
+ * what the 3D viewer uses.
  */
 export interface Rotation3 {
-  roll: number;   // Rotation around X axis
-  pitch: number;  // Rotation around Y axis
-  yaw: number;    // Rotation around Z axis
+  roll: number; // about X
+  pitch: number; // about Y
+  yaw: number; // about Z
 }
 
 /**
- * 6DOF Pose (position + orientation)
+ * 6DOF pose: position in metres, orientation in radians.
  */
 export interface Pose {
   position: Vector3;
@@ -27,83 +40,39 @@ export interface Pose {
 }
 
 /**
- * Denavit-Hartenberg Parameters (Modified DH Convention)
- *
- * Modified DH parameters (Craig convention):
- * - alpha: Twist angle between Z(i-1) and Z(i) about X(i-1) [radians]
- * - a: Link length from Z(i-1) to Z(i) along X(i-1) [meters]
- * - d: Link offset from X(i-1) to X(i) along Z(i) [meters]
- * - theta: Joint angle between X(i-1) and X(i) about Z(i) [radians]
- */
-export interface DHParameter {
-  alpha: number;  // Twist angle (rad)
-  a: number;      // Link length (m)
-  d: number;      // Link offset (m)
-  theta: number;  // Joint angle (rad) - variable for revolute joints
-}
-
-/**
- * 4x4 Homogeneous Transformation Matrix
+ * 4x4 homogeneous transformation matrix, row-major.
  */
 export type Matrix4x4 = number[][];
 
 /**
- * URDF Joint definition
- */
-export interface URDFJoint {
-  name: string;
-  type: 'revolute' | 'continuous' | 'fixed';
-  parent: string;
-  child: string;
-  origin: {
-    xyz: Vector3;
-    rpy: Rotation3;
-  };
-  axis: Vector3;
-  limit?: {
-    lower: number;
-    upper: number;
-    effort: number;
-    velocity: number;
-  };
-}
-
-/**
- * Forward Kinematics Result
+ * Forward kinematics result.
  */
 export interface FKResult {
+  /** TCP pose in base coordinates */
   endEffectorPose: Pose;
-  jointTransforms: Matrix4x4[];  // Transform for each joint
+  /** Pose of each joint frame in base coordinates, J1..J6 */
+  jointTransforms: Matrix4x4[];
   success: boolean;
   error?: string;
 }
 
 /**
- * Inverse Kinematics Result
+ * Inverse kinematics result.
  */
 export interface IKResult {
-  jointAngles: number[];  // Solution in radians
+  /** Solution in DEGREES, ordered J1..J6. On failure this is the best pose found. */
+  jointAngles: number[];
   success: boolean;
+  /** Human-readable reason when success is false */
   error?: string;
+  /** Total iterations across all seed attempts */
   iterations?: number;
+  /** Remaining position error in metres */
   residualError?: number;
 }
 
 /**
- * IK Solver Configuration
- */
-export interface IKConfig {
-  maxIterations: number;
-  tolerance: number;          // Position tolerance in meters
-  dampingFactor: number;      // Damping for Jacobian pseudo-inverse
-  jointLimits: {
-    min: number[];
-    max: number[];
-  };
-}
-
-/**
- * Jacobian Matrix (6 x n) for velocity kinematics
- * Maps joint velocities to end-effector velocities
+ * Jacobian matrix, 6 x 6 for this arm.
+ * Rows 0-2 are linear velocity (m/rad), rows 3-5 angular velocity (rad/rad).
  */
 export type JacobianMatrix = number[][];

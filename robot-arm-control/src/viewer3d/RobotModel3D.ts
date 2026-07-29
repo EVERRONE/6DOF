@@ -1,10 +1,11 @@
-// 3D Robot Model Builder with FK transforms
+// 3D Robot Model Builder.
+//
+// The joint hierarchy is built from ROBOT_JOINTS, the same chain the kinematics
+// core solves against, so what you see is what FK and IK compute.
 import * as THREE from 'three';
 import { JointNode, Robot3DModel } from './types';
 import { loadAllRobotMeshes, createMeshFromGeometry, getLinkColor } from './STLLoader';
-import { ROBOT_KINEMATIC_CHAIN } from '../kinematics/URDFParser';
-import { ForwardKinematics } from '../kinematics/ForwardKinematics';
-import { Matrix4x4 } from '../kinematics/types';
+import { ROBOT_JOINTS } from '../kinematics/robotModel';
 
 /**
  * Build 3D robot model from STL meshes
@@ -57,7 +58,7 @@ export class RobotModel3DBuilder {
     const linkNames = ['link0', 'link1', 'link2', 'link3', 'link4', 'link5'];
 
     for (let i = 0; i < 6; i++) {
-      const jointInfo = ROBOT_KINEMATIC_CHAIN[i];
+      const jointInfo = ROBOT_JOINTS[i];
       const linkName = linkNames[i];
 
       // Create joint group (represents joint's coordinate frame)
@@ -186,7 +187,7 @@ export class RobotModel3DBuilder {
       const angle = anglesRad[i];
 
       // All joints rotate around Z-axis (from URDF axis="0 0 1")
-      const origin = ROBOT_KINEMATIC_CHAIN[i].origin;
+      const origin = ROBOT_JOINTS[i].origin;
 
       // URDF rpy = extrinsic XYZ = Three.js Euler order 'ZYX'
       const urdfRotation = new THREE.Euler(

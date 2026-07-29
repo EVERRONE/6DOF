@@ -18,11 +18,7 @@ export class PathInterpolator {
   private ikSolver: InverseKinematics;
 
   constructor() {
-    this.ikSolver = new InverseKinematics({
-      maxIterations: 100,
-      tolerance: 0.001,
-      dampingFactor: 0.01
-    });
+    this.ikSolver = new InverseKinematics();
   }
 
   /**
