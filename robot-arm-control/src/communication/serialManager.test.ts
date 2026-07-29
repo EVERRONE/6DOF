@@ -120,7 +120,7 @@ describe('serial manager: parsing', () => {
   it('parses a status line into queue space, trust and homed flags', async () => {
     const { manager, port, messages } = await connected();
 
-    port.push('STATUS MOVING 17 1 1 30\n');
+    port.push('STATUS MOVING 17 1 1 30 1\n');
     await flush();
 
     const status = messages.find(m => m.type === 'STATUS');
@@ -130,7 +130,8 @@ describe('serial manager: parsing', () => {
       moving: true,
       positionTrusted: true,
       // mask 30 = 0b011110 = J2..J5
-      homed: [false, true, true, true, true, false]
+      homed: [false, true, true, true, true, false],
+      enabled: true
     });
     expect(manager.status?.queueFree).toBe(17);
 

@@ -25,6 +25,11 @@ export interface FirmwareStatus {
   positionTrusted: boolean;
   /** Per-joint: has this joint been homed since power-up? */
   homed: boolean[];
+  /**
+   * Whether the drivers are energised, as reported by the firmware rather than
+   * assumed from the host's own E command.
+   */
+  enabled: boolean;
 }
 
 /** Reply to a queued move. */

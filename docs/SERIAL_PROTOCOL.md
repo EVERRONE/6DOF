@@ -83,7 +83,7 @@ Failure reasons:
 
 | Reason | Meaning |
 |--------|---------|
-| `Endstop not found within travel limit` | Seek ran the whole `HOMING_MAX_TRAVEL` without the switch closing. Check wiring and the seek direction. |
+| `Endstop not found in travel range, check HOME_TOWARD_MIN direction` | The seek covered the joint's whole range without the switch closing. Wiring, or the seek direction is wrong. |
 | `Endstop still closed after back-off` | The switch did not release. Stuck or miswired; homing stops rather than drive into the hard stop. |
 | `Endstop not found on fine approach` | The switch closed on the fast seek but not on the slow one. |
 | `Homing phase timed out` | A phase exceeded its watchdog. |
@@ -164,7 +164,7 @@ report `0`.
 ### `STATUS`
 
 ```
-STATUS <state> <queueFree> <moving> <positionTrusted> <homedMask>
+STATUS <state> <queueFree> <moving> <positionTrusted> <homedMask> <enabled>
 ```
 
 | Field | Meaning |
@@ -174,6 +174,7 @@ STATUS <state> <queueFree> <moving> <positionTrusted> <homedMask>
 | `moving` | `1` while step generation is active |
 | `positionTrusted` | `0` when a hard stop may have lost steps, or the arm has not been fully homed |
 | `homedMask` | Bit *i* set means joint *i+1* has a datum. `30` = J2..J5 |
+| `enabled` | `1` when the drivers are energised. Reported so the host need not assume its own `E` command succeeded |
 
 `state` is `IDLE` only when the queue is empty **and** the arm has stopped, so it
 is the correct thing to wait on for "motion finished". Note that a `STATUS` can
@@ -236,7 +237,7 @@ consecutive points are nearly collinear.
 | `speed` argument | required | optional |
 | Homing | blocking; froze the controller for the whole run | asynchronous state machine |
 | `POS` during a move | stale; only refreshed when a move finished | live |
-| `STATUS` | did not exist | queue space, homed flags, position trust |
+| `STATUS` | did not exist | queue space, homed flags, position trust, driver state |
 | `A` (abort) | did not exist | graceful decelerate-and-clear |
 | Position trust | not tracked | cleared by a hard stop, set by homing |
 

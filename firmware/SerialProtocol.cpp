@@ -313,7 +313,7 @@ void SerialProtocol::sendEndstops() {
 }
 
 void SerialProtocol::sendStatus() {
-  // STATUS <state> <queueFree> <moving> <positionTrusted> <homedMask>
+  // STATUS <state> <queueFree> <moving> <positionTrusted> <homedMask> <enabled>
   const char* name = "IDLE";
   switch (currentState()) {
     case STATE_MOVING:   name = "MOVING"; break;
@@ -338,7 +338,11 @@ void SerialProtocol::sendStatus() {
   Serial.print(' ');
   Serial.print(stepper_.positionTrusted() ? '1' : '0');
   Serial.print(' ');
-  Serial.println((int)homedMask);
+  Serial.print((int)homedMask);
+  Serial.print(' ');
+  // Whether the drivers are energised. Reported so the host does not have to
+  // assume its own E command succeeded.
+  Serial.println(stepper_.isEnabled() ? '1' : '0');
 }
 
 void SerialProtocol::sendError(const char* message) {

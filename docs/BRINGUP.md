@@ -9,6 +9,12 @@ something you find out by the sound.
 **Have a hand on the power switch throughout.** Steps 1 to 4 can drive a joint the
 wrong way, and the software cannot know which way is right until you tell it.
 
+Everything below can be done from the web app, no serial monitor needed — and a
+serial monitor could not hold the port at the same time anyway. The **Jog** tab has
+per-joint nudge buttons with a selectable step, and the **Console** underneath it
+shows everything the arm reports and sends any command literally. `Escape` is the
+emergency stop.
+
 ---
 
 ## 0. Before power

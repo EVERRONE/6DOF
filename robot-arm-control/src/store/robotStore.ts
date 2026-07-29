@@ -14,6 +14,24 @@ import {
   SavedPath
 } from '../motion/types';
 import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG } from '../motion/TrajectoryPlanner';
+import {
+  HOME_POSE_DEG,
+  JOINT_LIMITS_DEG,
+  NUM_JOINTS,
+  clampToLimitsDeg
+} from '../kinematics/robotModel';
+
+/** One line for the on-screen event log. */
+export interface RobotEvent {
+  id: number;
+  at: number;
+  kind: 'sent' | 'ok' | 'error' | 'info';
+  text: string;
+}
+
+/** How many events to keep. Enough to scroll back through a homing run. */
+const MAX_EVENTS = 200;
+let nextEventId = 1;
 
 interface RobotStore {
   // Connection
@@ -28,6 +46,13 @@ interface RobotStore {
   targetAngles: JointAngles;
   endstopState: EndstopState;
   motorsEnabled: boolean;
+
+  /**
+   * Everything the arm said, and everything we said to it. The firmware's replies
+   * used to go only to console.error, which hid "Endstop triggered during move"
+   * from the one person who needs to see it.
+   */
+  events: RobotEvent[];
 
   /** Last STATUS line from the firmware: queue space, homed flags, trust. */
   firmwareStatus: FirmwareStatus | null;
@@ -63,6 +88,17 @@ interface RobotStore {
   enableMotors: (enable: boolean) => Promise<void>;
   emergencyStop: () => Promise<void>;
   setManualSpeed: (speed: number) => void;
+
+  /** Copy the arm's reported angles into the target fields. */
+  syncTargetsToCurrent: () => void;
+  /** Move one joint by a relative amount, from the current target. */
+  jogJoint: (joint: keyof JointAngles, deltaDegrees: number) => Promise<void>;
+  /** Move to the post-homing rest pose. */
+  goToHomePose: () => Promise<void>;
+  /** Send a raw protocol line, for bring-up and diagnostics. */
+  sendRawCommand: (line: string) => Promise<void>;
+  clearEvents: () => void;
+  logEvent: (kind: RobotEvent['kind'], text: string) => void;
 
   // Cartesian space actions
   setTargetPosition: (position: Vector3) => void;
@@ -100,6 +136,13 @@ let trajectoryPlanner = new TrajectoryPlanner();
 // Execution control
 let executionAbortController: AbortController | null = null;
 let executionPaused = false;
+
+/**
+ * Whether the target fields have adopted a real reported position yet. Reset on
+ * every disconnect, so a reconnect re-seeds from the arm rather than from stale
+ * numbers.
+ */
+let targetsInitialised = false;
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -160,6 +203,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   targetAngles: { J1: 0, J2: 0, J3: 0, J4: 0, J5: 0, J6: 0 },
   endstopState: { J1: false, J2: false, J3: false, J4: false, J5: false, J6: false },
   motorsEnabled: false,
+  events: [],
   firmwareStatus: null,
   firmwareStatusAt: 0,
   currentPosition: null,
@@ -187,8 +231,16 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     if (isNew) {
       manager.onStateChange((state, detail) => {
         set({ connectionStatus: state, connectionDetail: detail ?? null });
+        get().logEvent(
+          state === ConnectionStatus.CONNECTED ? 'info' : 'error',
+          detail ? `${state}: ${detail}` : state
+        );
 
         if (state === ConnectionStatus.CONNECTED) return;
+
+        // The reported position is no longer live, so stop treating it as the
+        // target seed.
+        targetsInitialised = false;
 
         // The link is down, so nothing about the arm is known any more. Abandon
         // any running path rather than let it resume against a controller that
@@ -212,6 +264,15 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
             set({ currentAngles: msg.data });
             // Compute forward kinematics to update XYZ position
             get().updateCurrentPosition();
+
+            // First position report after connecting: adopt it as the target, so
+            // the target fields describe where the arm IS. They used to start at
+            // all zeros, which made the very first "Move to Target" slam every
+            // joint to zero - a 220 degree swing on J5 from the rest pose.
+            if (!targetsInitialised) {
+              targetsInitialised = true;
+              set({ targetAngles: { ...msg.data } });
+            }
             break;
           case 'ENDSTOP':
             set({ endstopState: msg.data });
@@ -222,11 +283,20 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
             set({
               firmwareStatus: msg.data,
               firmwareStatusAt: msg.timestamp,
-              robotState: toRobotState(msg.data.state)
+              robotState: toRobotState(msg.data.state),
+              // Reported by the firmware rather than assumed from our own E
+              // command, which could have been rejected or lost.
+              motorsEnabled: msg.data.enabled
             });
             break;
+          case 'HOMED':
+            get().logEvent('ok', `J${msg.data} homed`);
+            break;
+          case 'OK':
+            get().logEvent('ok', msg.data);
+            break;
           case 'ERROR':
-            console.error('Robot error:', msg.data);
+            get().logEvent('error', msg.data);
             break;
         }
       });
@@ -274,9 +344,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const { serialManager, targetAngles, manualSpeed } = get();
     if (!serialManager) return;
 
+    get().logEvent('sent', 'move to target');
     const ack = await serialManager.moveToAngles(targetAngles, manualSpeed);
     if (!ack.accepted) {
-      console.warn('Move rejected: firmware queue full');
+      get().logEvent('error', 'Move refused: firmware queue full');
       return;
     }
     set({ robotState: RobotState.MOVING });
@@ -287,6 +358,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const { serialManager } = get();
     if (!serialManager) return;
 
+    get().logEvent('sent', `H ${joints}`);
     set({ robotState: RobotState.HOMING });
     await serialManager.homeJoints(joints);
   },
@@ -296,8 +368,11 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const { serialManager } = get();
     if (!serialManager) return;
 
+    get().logEvent('sent', `E ${enable ? 1 : 0}`);
     await serialManager.enableMotors(enable);
-    set({ motorsEnabled: enable });
+    // motorsEnabled is not set here: the next STATUS report says what actually
+    // happened, and guessing would show the drivers as live when the command was
+    // refused.
   },
 
   // Emergency stop
@@ -323,6 +398,86 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   // Set manual speed
   setManualSpeed: (speed) => {
     set({ manualSpeed: speed });
+  },
+
+  logEvent: (kind, text) => {
+    if (!text) return;
+    set(state => ({
+      events: [
+        ...state.events.slice(-(MAX_EVENTS - 1)),
+        { id: nextEventId++, at: Date.now(), kind, text }
+      ]
+    }));
+  },
+
+  clearEvents: () => set({ events: [] }),
+
+  syncTargetsToCurrent: () => {
+    set(state => ({ targetAngles: { ...state.currentAngles } }));
+  },
+
+  /**
+   * Nudge one joint. Measured from the current target rather than the reported
+   * position, so pressing +5 three times moves 15 degrees even while the arm is
+   * still catching up.
+   */
+  jogJoint: async (joint, deltaDegrees) => {
+    const { serialManager, targetAngles, manualSpeed } = get();
+    if (!serialManager) return;
+
+    const index = (['J1', 'J2', 'J3', 'J4', 'J5', 'J6'] as const).indexOf(joint);
+    if (index < 0) return;
+
+    const proposed = targetAngles[joint] + deltaDegrees;
+    const clamped = Math.max(
+      JOINT_LIMITS_DEG.min[index],
+      Math.min(JOINT_LIMITS_DEG.max[index], proposed)
+    );
+
+    if (clamped !== proposed) {
+      get().logEvent('info', `${joint} clamped to its limit at ${clamped.toFixed(1)} deg`);
+    }
+
+    const next: JointAngles = { ...targetAngles, [joint]: clamped };
+    set({ targetAngles: next });
+
+    get().logEvent('sent', `jog ${joint} ${deltaDegrees > 0 ? '+' : ''}${deltaDegrees}`);
+    const ack = await serialManager.moveToAngles(next, manualSpeed);
+    if (!ack.accepted) get().logEvent('error', 'Move refused: firmware queue full');
+  },
+
+  goToHomePose: async () => {
+    const { serialManager, manualSpeed } = get();
+    if (!serialManager) return;
+
+    const pose = clampToLimitsDeg(HOME_POSE_DEG.slice(0, NUM_JOINTS));
+    const angles: JointAngles = {
+      J1: pose[0], J2: pose[1], J3: pose[2], J4: pose[3], J5: pose[4], J6: pose[5]
+    };
+
+    set({ targetAngles: angles });
+    get().logEvent('sent', 'move to rest pose');
+
+    const ack = await serialManager.moveToAngles(angles, manualSpeed);
+    if (!ack.accepted) get().logEvent('error', 'Move refused: firmware queue full');
+  },
+
+  /**
+   * Send a protocol line as typed. The bring-up checklist asks for exact commands
+   * such as `J 0 0 10 0 0 0 5`, and without this the only way to send one was a
+   * separate serial monitor, which cannot hold the port at the same time.
+   */
+  sendRawCommand: async (line) => {
+    const { serialManager } = get();
+    const trimmed = line.trim();
+    if (!serialManager || trimmed.length === 0) return;
+
+    get().logEvent('sent', trimmed);
+    try {
+      await serialManager.sendCommand(trimmed);
+    } catch (error) {
+      get().logEvent('error', error instanceof Error ? error.message : 'Send failed');
+    }
   },
 
   // Update current Cartesian position using forward kinematics
@@ -374,7 +529,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     if (!ikResult.success) {
       // The Cartesian panel renders ikStatus, including the residual, so there is
       // no need to interrupt with a modal dialog.
-      console.warn('IK failed:', ikResult.error);
+      get().logEvent('error', `IK: ${ikResult.error ?? 'no solution'}`);
       return;
     }
 
@@ -389,9 +544,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
     set({ targetAngles });
 
+    get().logEvent('sent', 'move to XYZ target');
     const ack = await serialManager.moveToAngles(targetAngles, manualSpeed);
     if (!ack.accepted) {
-      console.warn('Move rejected: firmware queue full');
+      get().logEvent('error', 'Move refused: firmware queue full');
       return;
     }
 

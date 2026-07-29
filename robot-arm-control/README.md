@@ -28,7 +28,20 @@ a watchdog when reports simply stop — abandons any running path, and reopens t
 port by itself on a backoff. Reconnecting needs no new port dialog, because the
 browser remembers a granted port.
 
-**Jog in joint space.** Sliders per joint, then *Move to Target*.
+**Jog in joint space.** The *Jog* tab nudges one joint at a time by a selectable
+step (0.1° to 45°), which is what bring-up needs — a slider spanning J4's 274° gives
+about a degree per pixel, so you can neither hit a value nor repeat one. Target
+fields take exact numbers, *Target ← Reported* copies the arm's live position in,
+and *Rest pose* goes to the post-homing pose in one click.
+
+The target fields adopt the arm's reported position on connect. They used to start
+at all zeros, so the first *Move to Target* after connecting swung J5 by 220° and
+J4 by 129° at once.
+
+**Console.** Under every tab: everything the arm reports, and a box that sends any
+protocol line literally. Firmware replies used to go only to `console.error`, which
+hid `Endstop triggered during move on J3` from the person standing next to the arm.
+Up and down walk the command history.
 
 **Jog in Cartesian space.** Type an XYZ target in millimetres. The input ranges are
 computed from the kinematic model, not hardcoded, but they are the outer bounding
@@ -58,6 +71,7 @@ within 1e-9 m. Shows the planned path, the target marker and the workspace bound
 | Queue | Free slots in the firmware motion queue. Depth is what keeps a streamed path continuous. |
 | Homed | Which joints have a datum. Without one, that joint's angle is only relative to wherever it powered up. |
 | Endstops | Debounced switch states. |
+| Motors on/off | Reported by the firmware, not assumed from the app's own command. |
 
 ## Structure
 
@@ -80,7 +94,7 @@ src/
 │   ├── SerialManager.ts     Transport, connection lifecycle, flow control
 │   └── serialManager.test.ts
 ├── viewer3d/                three.js model building and STL loading
-├── components/              UI panels
+├── components/              UI panels, incl. CommandConsole (log + raw entry)
 ├── store/
 │   ├── robotStore.ts        Zustand state and the trajectory sender
 │   └── robotStore.test.ts

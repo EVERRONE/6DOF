@@ -1036,6 +1036,30 @@ static void testProtocol() {
   CHECK(logContains("STATUS "));
   pass("Q returns position, endstops and status");
 
+  // The status line must say whether the drivers are live, so the host does not
+  // have to assume its own E command worked.
+  clearLog();
+  feed("E 1");
+  feed("Q");
+  pump(protocol);
+  {
+    const size_t at = mock::hw.txLog.rfind("STATUS ");
+    const std::string line = mock::hw.txLog.substr(at, mock::hw.txLog.find('\n', at) - at);
+    printf("        %s\n", line.c_str());
+    CHECK(line.size() > 2 && line[line.size() - 1] == '1');
+  }
+
+  clearLog();
+  feed("E 0");
+  feed("Q");
+  pump(protocol);
+  {
+    const size_t at = mock::hw.txLog.rfind("STATUS ");
+    const std::string line = mock::hw.txLog.substr(at, mock::hw.txLog.find('\n', at) - at);
+    CHECK(line.size() > 2 && line[line.size() - 1] == '0');
+  }
+  pass("status reports whether the drivers are energised");
+
   clearLog();
   feed("S");
   pump(protocol);

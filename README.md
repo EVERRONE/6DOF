@@ -92,9 +92,10 @@ for.
 
 ## Current state
 
-Working: forward and inverse kinematics, 3D visualisation, joint and Cartesian
-jogging, teach-and-playback of waypoint paths, homing, acceleration-limited
-coordinated motion, and reconnection after the link drops.
+Working: forward and inverse kinematics, 3D visualisation, per-joint jogging with
+a live event console and raw command entry, Cartesian moves through IK,
+teach-and-playback of waypoint paths, homing, acceleration-limited coordinated
+motion, and reconnection after the link drops.
 
 Not verified on hardware: direction inversion, homing direction, and the
 calibration constants. The software has been tested as far as it can be without

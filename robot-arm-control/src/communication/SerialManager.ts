@@ -496,8 +496,8 @@ export class SerialManager {
       }
 
       case 'STATUS': {
-        // STATUS <state> <queueFree> <moving> <positionTrusted> <homedMask>
-        if (parts.length !== 6) return;
+        // STATUS <state> <queueFree> <moving> <positionTrusted> <homedMask> <enabled>
+        if (parts.length < 6) return;
 
         const queueFree = parseInt(parts[2], 10);
         if (Number.isNaN(queueFree)) return;
@@ -510,7 +510,9 @@ export class SerialManager {
           positionTrusted: parts[4] === '1',
           homed: Array.from({ length: 6 }, (_, i) =>
             Number.isNaN(homedMask) ? false : (homedMask & (1 << i)) !== 0
-          )
+          ),
+          // Absent from older firmware, which never reported it.
+          enabled: parts[6] === '1'
         };
 
         this.lastStatus = status;

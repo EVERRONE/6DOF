@@ -25,8 +25,8 @@ async function settle(rounds = 60): Promise<void> {
   for (let k = 0; k < rounds; k++) await flush();
 }
 
-const STATUS_IDLE = 'STATUS IDLE 23 0 1 30\n';
-const STATUS_MOVING = 'STATUS MOVING 20 1 1 30\n';
+const STATUS_IDLE = 'STATUS IDLE 23 0 1 30 1\n';
+const STATUS_MOVING = 'STATUS MOVING 20 1 1 30 1\n';
 
 interface Harness {
   port: FakePort;
@@ -137,7 +137,7 @@ describe('store: connection', () => {
     await flush();
     expect(useRobotStore.getState().robotState).toBe(RobotState.MOVING);
 
-    port.push('STATUS ESTOP 23 0 0 30\n');
+    port.push('STATUS ESTOP 23 0 0 30 1\n');
     await flush();
     expect(useRobotStore.getState().robotState).toBe(RobotState.ESTOPPED);
   });
@@ -340,6 +340,156 @@ describe('store: stopping', () => {
     expect(commandsOfType(port, 'S')).toHaveLength(1);
     expect(useRobotStore.getState().robotState).toBe(RobotState.ESTOPPED);
     expect(useRobotStore.getState().executionState).toBe(ExecutionState.IDLE);
+  });
+});
+
+describe('store: bench controls', () => {
+  it('adopts the reported position as the target on connect', async () => {
+    // Regression, and the most dangerous thing in the old UI: targetAngles started
+    // at all zeros and was never seeded, so the first "Move to Target" click after
+    // connecting swung J5 220 degrees and J4 129 degrees at once.
+    const { port } = await connectStore();
+
+    port.push('POS 0.00 5.00 55.00 129.00 220.00 0.00\n');
+    await flush();
+
+    expect(useRobotStore.getState().targetAngles).toEqual({
+      J1: 0, J2: 5, J3: 55, J4: 129, J5: 220, J6: 0
+    });
+  });
+
+  it('does not keep overwriting the target as the arm moves', async () => {
+    const { port } = await connectStore();
+
+    port.push('POS 0.00 5.00 55.00 129.00 220.00 0.00\n');
+    await flush();
+
+    useRobotStore.getState().setTargetAngles({ J2: 30 });
+    port.push('POS 0.00 6.00 55.00 129.00 220.00 0.00\n');
+    await flush();
+
+    // Seeding is one-shot; after that the target is the operator's to set.
+    expect(useRobotStore.getState().targetAngles.J2).toBe(30);
+  });
+
+  it('re-seeds the target after a reconnect', async () => {
+    const { port } = await connectStore();
+
+    port.push('POS 0.00 5.00 55.00 129.00 220.00 0.00\n');
+    await flush();
+    useRobotStore.getState().setTargetAngles({ J2: 30 });
+
+    port.endStream();
+    await settle(10);
+
+    // The controller restarts on a reconnect, so stale targets must not survive.
+    await useRobotStore.getState().connect(useRobotStore.getState().serialManager!);
+    await flush();
+    port.push('POS 0.00 5.00 55.00 129.00 220.00 0.00\n');
+    await flush();
+
+    expect(useRobotStore.getState().targetAngles.J2).toBe(5);
+  });
+
+  it('jogs a joint relative to the target, so repeats accumulate', async () => {
+    const { port } = await connectStore();
+    port.push('POS 0.00 5.00 55.00 129.00 220.00 0.00\n');
+    await flush();
+
+    await useRobotStore.getState().jogJoint('J2', 5);
+    await useRobotStore.getState().jogJoint('J2', 5);
+    await flush();
+
+    expect(useRobotStore.getState().targetAngles.J2).toBe(15);
+
+    const moves = commandsOfType(port, 'J ');
+    expect(moves).toHaveLength(2);
+    expect(moves[1]).toContain('15.000');
+  });
+
+  it('clamps a jog at the joint limit and says so', async () => {
+    const { port } = await connectStore();
+    port.push('POS 0.00 5.00 55.00 129.00 220.00 0.00\n');
+    await flush();
+
+    // J2 stops at 60.
+    await useRobotStore.getState().jogJoint('J2', 500);
+    await flush();
+
+    expect(useRobotStore.getState().targetAngles.J2).toBe(60);
+    expect(
+      useRobotStore.getState().events.some(e => /clamped/i.test(e.text))
+    ).toBe(true);
+  });
+
+  it('takes the motor state from the firmware, not from its own command', async () => {
+    const { port } = await connectStore();
+
+    await useRobotStore.getState().enableMotors(true);
+    await flush();
+
+    // The E command went out, but nothing is assumed until the arm confirms.
+    expect(commandsOfType(port, 'E ')).toHaveLength(1);
+    expect(useRobotStore.getState().motorsEnabled).toBe(false);
+
+    port.push('STATUS IDLE 23 0 1 30 1\n');
+    await flush();
+    expect(useRobotStore.getState().motorsEnabled).toBe(true);
+
+    port.push('STATUS IDLE 23 0 1 30 0\n');
+    await flush();
+    expect(useRobotStore.getState().motorsEnabled).toBe(false);
+  });
+
+  it('logs what the arm says, including errors', async () => {
+    const { port } = await connectStore();
+
+    port.push('ERROR Endstop triggered during move on J3\n');
+    port.push('HOMED 2\n');
+    await flush();
+
+    const events = useRobotStore.getState().events;
+
+    // This used to go only to console.error, which hid it from the one person
+    // standing next to the arm.
+    expect(
+      events.some(e => e.kind === 'error' && /endstop triggered/i.test(e.text))
+    ).toBe(true);
+    expect(events.some(e => e.kind === 'ok' && /J2 homed/.test(e.text))).toBe(true);
+  });
+
+  it('sends a raw command as typed, and logs it', async () => {
+    const { port } = await connectStore();
+
+    await useRobotStore.getState().sendRawCommand('  J 0 0 10 0 0 0 5  ');
+    await flush();
+
+    expect(port.lastCommand()).toBe('J 0 0 10 0 0 0 5');
+    expect(
+      useRobotStore.getState().events.some(e => e.kind === 'sent' && e.text === 'J 0 0 10 0 0 0 5')
+    ).toBe(true);
+  });
+
+  it('ignores an empty raw command', async () => {
+    const { port } = await connectStore();
+    const before = port.written.length;
+
+    await useRobotStore.getState().sendRawCommand('   ');
+    expect(port.written).toHaveLength(before);
+  });
+
+  it('bounds the event log', async () => {
+    const { port } = await connectStore();
+
+    for (let k = 0; k < 400; k++) {
+      port.push(`ERROR problem ${k}\n`);
+    }
+    await settle(20);
+
+    const events = useRobotStore.getState().events;
+    expect(events.length).toBeLessThanOrEqual(200);
+    // The newest are the ones kept.
+    expect(events[events.length - 1].text).toContain('399');
   });
 });
 
