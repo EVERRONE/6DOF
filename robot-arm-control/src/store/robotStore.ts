@@ -51,7 +51,11 @@ interface RobotStore {
   plannerConfig: PathPlannerConfig;
 
   // Joint space actions
-  connect: () => Promise<void>;
+  /**
+   * Open the link. `manager` is a test seam: production calls this with no
+   * argument and the store builds its own.
+   */
+  connect: (manager?: SerialManager) => Promise<void>;
   disconnect: () => Promise<void>;
   setTargetAngles: (angles: Partial<JointAngles>) => void;
   moveToTarget: () => Promise<void>;
@@ -98,6 +102,9 @@ let executionAbortController: AbortController | null = null;
 let executionPaused = false;
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+/** Result of offering one trajectory point to the firmware. */
+type SendOutcome = 'sent' | 'aborted' | 'paused';
 
 /** Map the firmware's reported state onto the UI's state enum. */
 function toRobotState(state: FirmwareState): RobotState {
@@ -169,10 +176,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   plannerConfig: { ...DEFAULT_PLANNER_CONFIG },
 
   // Connect to robot
-  connect: async () => {
+  connect: async (injected?: SerialManager) => {
     // Reuse the existing manager if there is one, so its listeners and
     // reconnect state are not duplicated.
-    const manager = get().serialManager ?? new SerialManager();
+    const manager = injected ?? get().serialManager ?? new SerialManager();
     const isNew = manager !== get().serialManager;
 
     set({ serialManager: manager, connectionDetail: null });
@@ -531,7 +538,6 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
     set({
       executionState: ExecutionState.EXECUTING,
-      robotState: RobotState.MOVING,
       executionProgress: {
         state: ExecutionState.EXECUTING,
         currentSegment: 0,
@@ -551,10 +557,13 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
     const aborted = () => executionAbortController?.signal.aborted ?? true;
 
+    // Deliberately does not touch robotState. The firmware's STATUS line is the
+    // authority on that, and setting it here raced an emergency stop: the sender
+    // unwinding would overwrite ESTOPPED with IDLE, so the UI stopped showing a
+    // stop the firmware still had latched.
     const stopAndReset = () => {
       set({
         executionState: ExecutionState.IDLE,
-        robotState: RobotState.IDLE,
         executionProgress: { ...initialProgress }
       });
     };
@@ -570,12 +579,17 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
      * trajectory and kept the queue shallow, so the arm restarted from a standstill
      * at every point.
      */
-    const sendPoint = async (angles: JointAngles): Promise<boolean> => {
+    const sendPoint = async (angles: JointAngles): Promise<SendOutcome> => {
       for (let attempt = 0; attempt < 2000; attempt++) {
-        if (aborted()) return false;
+        if (aborted()) return 'aborted';
+
+        // A full queue can hold the sender here for seconds, so the pause has to
+        // be observed inside the retry loop too. Checking only at the top of the
+        // outer loop left the pause button doing nothing until the queue drained.
+        if (executionPaused) return 'paused';
 
         const ack = await serialManager.moveToAngles(angles, speed);
-        if (ack.accepted) return true;
+        if (ack.accepted) return 'sent';
 
         // Queue full: normal back-pressure. Wait for the arm to consume a move.
         await sleep(20);
@@ -598,7 +612,9 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
     try {
       for (let loop = 0; loop < iterations; loop++) {
-        for (let i = 0; i < allPoints.length; i++) {
+        // The index advances in the body, so a point interrupted by a pause is
+        // retried rather than skipped.
+        for (let i = 0; i < allPoints.length; ) {
           if (aborted()) {
             stopAndReset();
             return;
@@ -636,9 +652,16 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
             J6: point.jointAngles[5]
           };
 
-          if (!(await sendPoint(angles))) {
+          const outcome = await sendPoint(angles);
+
+          if (outcome === 'aborted') {
             stopAndReset();
             return;
+          }
+          if (outcome === 'paused') {
+            // Do not advance: this point was not accepted, and the pause handler
+            // at the top of the loop is what stops the arm.
+            continue;
           }
 
           const where = locateSegment(trajectory, i);
@@ -661,6 +684,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
               )
             }
           });
+
+          i++;
         }
       }
 
@@ -676,7 +701,6 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       // Execution complete
       set({
         executionState: ExecutionState.COMPLETED,
-        robotState: RobotState.IDLE,
         executionProgress: {
           ...get().executionProgress,
           state: ExecutionState.COMPLETED,
@@ -695,7 +719,6 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       console.error('Trajectory execution error:', error);
       set({
         executionState: ExecutionState.ERROR,
-        robotState: RobotState.ERROR,
         executionProgress: {
           ...get().executionProgress,
           state: ExecutionState.ERROR
@@ -745,7 +768,6 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
     set({
       executionState: ExecutionState.IDLE,
-      robotState: RobotState.IDLE,
       executionProgress: { ...initialProgress }
     });
   },

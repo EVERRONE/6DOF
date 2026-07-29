@@ -5,7 +5,7 @@ a browser app for kinematics, path planning and 3D visualisation over Web Serial
 
 ```
 robot-arm-control/     React + TypeScript app (kinematics, planning, 3D view)
-firmware/              Teensy 4.1 firmware (step generation, homing, protocol)
+firmware/              Teensy 4.1 firmware (step generation, homing, safety, protocol)
 firmware/test/         Host-side firmware tests, no board required
 docs/                  Hardware, kinematics and protocol reference
 stl_meshes/            Link geometry for the 3D view
@@ -28,17 +28,16 @@ npm start
 Then open it in Chrome or Edge — Web Serial exists nowhere else — and press
 *Connect to Robot*.
 
-**Before moving the arm for the first time**, work through the bring-up sequence
-in [firmware/README.md](firmware/README.md#bring-up-on-the-arm). Direction
-inversion and homing direction are not verified for this build; see
-[Unresolved conflicts](docs/HARDWARE.md#unresolved-conflicts). Getting them wrong
-drives a joint into a hard stop.
+**Before moving the arm for the first time**, work through
+[docs/BRINGUP.md](docs/BRINGUP.md). Direction inversion, homing direction and the
+calibration constants are all unverified for this build, and getting the first two
+wrong drives a joint into a hard stop.
 
 ## Tests
 
 ```bash
-make -C firmware/test test              # 593 checks, no hardware needed
-cd robot-arm-control && npm test        # 83 tests
+make -C firmware/test test        # firmware, no hardware needed
+cd robot-arm-control && npm test  # kinematics, motion, transport, store
 ```
 
 The firmware tests compile the real `StepperController`, `HomingController`,
@@ -87,7 +86,8 @@ for.
 | [docs/HARDWARE.md](docs/HARDWARE.md) | Motors, reductions, pins, limits, calibration, and the unresolved config conflicts |
 | [docs/KINEMATICS.md](docs/KINEMATICS.md) | The kinematic chain, FK, the Jacobian, the IK solver, workspace |
 | [docs/SERIAL_PROTOCOL.md](docs/SERIAL_PROTOCOL.md) | Wire format, flow control, how to stream a trajectory |
-| [firmware/README.md](firmware/README.md) | Firmware architecture, tuning, bring-up, troubleshooting |
+| [docs/BRINGUP.md](docs/BRINGUP.md) | Ordered checklist for the first session with the arm |
+| [firmware/README.md](firmware/README.md) | Firmware architecture, tuning, troubleshooting |
 | [URDF.md](URDF.md) | Link and joint geometry |
 
 ## Current state

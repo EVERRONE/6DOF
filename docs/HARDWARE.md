@@ -185,6 +185,7 @@ Work one joint at a time, with the arm free to move:
 3. `E 0` and check by hand whether all six motors actually lose holding torque.
    If J4–J6 stay energised, pin 9 is not wired and the notes are right.
 
+Steps 2 and 5 of [BRINGUP.md](BRINGUP.md) walk through this in the right order.
 Update this file and `firmware/config.h` together with what you find, and delete
 the conflicting column.
 
@@ -192,7 +193,8 @@ the conflicting column.
 
 ## Related
 
-- [firmware/README.md](../firmware/README.md) — firmware architecture, tuning, bring-up
+- [BRINGUP.md](BRINGUP.md) — ordered checklist for the first session with the arm
+- [firmware/README.md](../firmware/README.md) — firmware architecture, tuning
 - [KINEMATICS.md](KINEMATICS.md) — the kinematic chain and the solvers
 - [SERIAL_PROTOCOL.md](SERIAL_PROTOCOL.md) — the host link
 - [../URDF.md](../URDF.md) — link geometry, the source for the kinematic chain

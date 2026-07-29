@@ -16,6 +16,7 @@
 
 #include "../HomingController.h"
 #include "../MotionPlanner.h"
+#include "../SafetyMonitor.h"
 #include "../SerialProtocol.h"
 #include "../StepperController.h"
 #include "../config.h"
@@ -836,6 +837,107 @@ static void testHomingRefusesJointsWithoutEndstops() {
   pass("J1 and J6 are refused, since they have no switch");
 }
 
+
+// ---------------------------------------------------------------------------
+// Safety monitor
+// ---------------------------------------------------------------------------
+
+static void testSafetyMonitor() {
+  section("safety: endstop closing during ordinary motion");
+
+  resetWorld();
+  for (int i = 0; i < NUM_AXES; i++) g_switchActive[i] = false;
+
+  StepperController stepper;
+  HomingController homing(stepper);
+  SafetyMonitor safety(stepper, homing);
+  Sim sim(stepper, &homing);
+  sim.registerHardware();
+  stepper.begin();
+  homing.begin();
+  stepper.enable();
+  stepper.setPositionTrusted(true);
+
+  // Idle and clear: nothing to report.
+  CHECK(safety.update() == -1);
+  CHECK(!safety.isTripped());
+  pass("silent while the arm is idle");
+
+  CHECK(stepper.queueMove(makeAngles(0, 50, 0, 0, 0, 0), MAX_JOINT_SPEED[1]));
+  sim.run(0.4);
+  CHECK(stepper.isMoving());
+  CHECK(safety.update() == -1);
+  pass("silent while moving with every switch open");
+
+  // Close J3's switch mid-move. Debounce needs consecutive polls, so let the
+  // simulated loop run rather than flipping the flag and checking immediately.
+  mock::hw.endstopClosed[2] = true;
+  for (int i = 0; i < 40; i++) {
+    homing.pollEndstops();
+    mock::hw.millisValue++;
+  }
+
+  const long stoppedAt = mock::hw.motorSteps[1];
+  const int tripped = safety.update();
+
+  CHECK(tripped == 2);
+  printf("        reported J%d\n", tripped + 1);
+  pass("reports the axis whose switch closed");
+
+  CHECK(stepper.isEmergencyStopped());
+  sim.run(0.1);
+  CHECK(mock::hw.motorSteps[1] == stoppedAt);
+  pass("stops immediately rather than decelerating into the hard stop");
+
+  CHECK(!stepper.positionTrusted());
+  pass("marks the position untrusted, so the arm gets re-homed");
+
+  // A stuck switch must not flood the link.
+  CHECK(safety.update() == -1);
+  CHECK(safety.update() == -1);
+  pass("reports once per movement, not once per loop pass");
+}
+
+static void testSafetyIgnoresHoming() {
+  section("safety: homing drives onto the switches on purpose");
+
+  resetWorld();
+  for (int i = 0; i < NUM_AXES; i++) {
+    g_switchActive[i] = HAS_ENDSTOP[i];
+    const double away = 4.0 * USTEPS_PER_DEG[i];
+    g_switchAt[i] = (long)(HOME_TOWARD_MIN[i] ? -away : away);
+  }
+
+  StepperController stepper;
+  HomingController homing(stepper);
+  SafetyMonitor safety(stepper, homing);
+  Sim sim(stepper, &homing);
+  sim.registerHardware();
+  sim.setEndstopModel(homingEndstopModel);
+  stepper.begin();
+  homing.begin();
+  stepper.enable();
+
+  const uint8_t axes[1] = {1};
+  CHECK(homing.start(axes, 1));
+
+  // Run the whole homing sequence with the monitor polled throughout. It must
+  // never trip, or homing could never touch a switch.
+  bool everTripped = false;
+  for (int i = 0; i < 4000000; i++) {
+    sim.tick();
+    if (i % (int)TICKS_PER_MS == 0) {
+      if (safety.update() >= 0) everTripped = true;
+      if (stepper.isIdle() && !homing.isBusy()) break;
+    }
+  }
+
+  CHECK(!everTripped);
+  CHECK(!homing.hasFailed());
+  CHECK(!stepper.isEmergencyStopped());
+  pass("never trips during a homing run");
+}
+
 // ---------------------------------------------------------------------------
 // Protocol
 // ---------------------------------------------------------------------------
@@ -1020,6 +1122,9 @@ int main() {
   testHomingBookkeeping();
   testHomingMissingEndstop();
   testHomingRefusesJointsWithoutEndstops();
+
+  testSafetyMonitor();
+  testSafetyIgnoresHoming();
 
   testProtocol();
   testLivePositionReporting();

@@ -16,7 +16,7 @@ requires `https://` or `localhost`.
 ```bash
 npm install
 npm start        # http://localhost:3000
-npm test         # 83 tests
+npm test         # kinematics, motion, transport, store
 npm run build
 ```
 
@@ -81,7 +81,10 @@ src/
 │   └── serialManager.test.ts
 ├── viewer3d/                three.js model building and STL loading
 ├── components/              UI panels
-├── store/robotStore.ts      Zustand state and the trajectory sender
+├── store/
+│   ├── robotStore.ts        Zustand state and the trajectory sender
+│   └── robotStore.test.ts
+├── testUtils/fakeSerial.ts  Fake port, shared by the transport and store tests
 └── App.tsx
 ```
 

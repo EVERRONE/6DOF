@@ -34,8 +34,9 @@ closed switch reads LOW.
 | `MotionPlanner.h/.cpp` | Move queue, velocity profiles, junction planning. No Arduino dependency, so it can be unit-tested on a host. |
 | `StepperController.h/.cpp` | Timer-interrupt step generation, position tracking, stopping. |
 | `HomingController.h/.cpp` | Homing as a non-blocking state machine, endstop debouncing. |
+| `SafetyMonitor.h/.cpp` | Stops the arm if an endstop closes during ordinary motion. |
 | `SerialProtocol.h/.cpp` | Host line protocol. See `docs/SERIAL_PROTOCOL.md`. |
-| `firmware.ino` | Wiring and the main loop. |
+| `firmware.ino` | Wiring and the main loop. Deliberately holds no logic: it is the one file the host tests cannot compile. |
 | `test/` | Host-side unit tests. |
 
 ### How motion works
@@ -164,14 +165,16 @@ junction planning for collinear, shallow, right-angle and reversing moves, queue
 accounting and back-pressure, profile shape including the triangular case, exact
 arrival on target, the acceleration ramp, continuity across a 20-point stream,
 graceful and emergency stops, joint-limit clamping, homing bookkeeping and its
-failure modes, command parsing, and live position reporting.
+failure modes, the endstop safety trip and that it stays quiet during homing,
+command parsing, and live position reporting.
 
 These tests cannot check anything electrical or mechanical. Bring-up on the real
 arm still needs the checks below.
 
 ## Bring-up on the arm
 
-Do these with the arm free to move and a hand near the power switch.
+The full ordered checklist is [docs/BRINGUP.md](../docs/BRINGUP.md). In short, with
+the arm free to move and a hand near the power switch:
 
 1. **Direction.** `E 1`, then a small move per joint (`J 0 5 0 0 0 0 5`). If a
    joint goes the wrong way, flip its entry in `INVERT_DIR`.
