@@ -154,6 +154,18 @@ export const JOINT_LIMITS_RAD = {
 };
 
 /**
+ * Per-joint speed and acceleration ceilings, mirroring MAX_JOINT_SPEED and
+ * MAX_JOINT_ACCEL in firmware/config.h.
+ *
+ * The firmware enforces these on every move regardless of what the host asks
+ * for, so planning against the same numbers is what makes the app's duration
+ * estimates and path preview match what the arm actually does. Change them in
+ * both places together; a test asserts these exact values.
+ */
+export const JOINT_MAX_SPEED_DEG_S: number[] = [60, 40, 60, 90, 120, 180];
+export const JOINT_MAX_ACCEL_DEG_S2: number[] = [150, 100, 150, 250, 300, 400];
+
+/**
  * Post-homing rest pose in degrees, from firmware/config.h POST_HOME_ANGLES.
  * Used as the default IK seed because it is a known-good, non-singular pose.
  */

@@ -287,6 +287,27 @@ export const PathPlannerPanel: React.FC = () => {
             </div>
           )}
         </div>
+
+        {/* A dropped waypoint or an out-of-reach stretch changes the path the arm
+            will actually run, so it has to be said out loud rather than logged. */}
+        {trajectory && trajectory.skippedWaypoints.length > 0 && (
+          <div className="mt-2 p-2 rounded text-xs bg-red-50 text-red-700">
+            Left out of the plan, no IK solution:{' '}
+            <span className="font-semibold">
+              {trajectory.skippedWaypoints.join(', ')}
+            </span>
+            . The arm will move straight past those positions.
+          </div>
+        )}
+
+        {trajectory && trajectory.unreachableSamples > 0 && (
+          <div className="mt-2 p-2 rounded text-xs bg-amber-50 text-amber-800">
+            {trajectory.unreachableSamples} point
+            {trajectory.unreachableSamples === 1 ? '' : 's'} along the straight
+            line could not be reached. The tool will cut the corner there instead
+            of following the line.
+          </div>
+        )}
       </div>
 
       {/* Execution Controls */}
@@ -489,7 +510,7 @@ const WaypointItem: React.FC<WaypointItemProps> = ({
         className="w-12 text-xs border rounded px-1 py-0.5 text-center"
         min={1}
         max={200}
-        title="Speed (mm/s)"
+        title="Feed rate for the move to this waypoint: mm/s in linear mode, deg/s in joint mode"
       />
 
       {/* Reorder buttons */}

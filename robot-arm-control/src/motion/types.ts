@@ -11,7 +11,13 @@ export interface Waypoint {
   orientation?: { roll: number; pitch: number; yaw: number };
   /** Joint angles snapshot at this waypoint (if taught) */
   jointAngles?: number[];
-  /** Speed for moving TO this waypoint (mm/s) */
+  /**
+   * Feed rate for the move TO this waypoint.
+   *
+   * The unit follows the interpolation mode: mm/s in 'linear' mode, deg/s in
+   * 'joint' mode. Either way the firmware clamps it to the per-joint limits, so
+   * an over-ambitious value is safe - it just runs as fast as the arm allows.
+   */
   speed: number;
   /** Label for UI display */
   label?: string;
@@ -48,6 +54,12 @@ export interface TrajectorySegment {
   points: TrajectoryPoint[];
   duration: number;       // total time in seconds
   distance: number;       // Cartesian distance in meters
+  /**
+   * Samples along a linear segment where IK found no solution, so the previous
+   * pose was held instead. Non-zero means part of the commanded straight line is
+   * out of reach and the arm will cut the corner there.
+   */
+  unreachableSamples?: number;
 }
 
 /**
@@ -59,6 +71,14 @@ export interface Trajectory {
   totalDistance: number;   // meters
   pointCount: number;
   waypoints: Waypoint[];
+  /**
+   * Total samples across all segments where IK found no solution. Non-zero means
+   * part of the planned path is out of reach, and the arm will not follow the
+   * line there.
+   */
+  unreachableSamples: number;
+  /** Waypoints that could not be resolved at all, and were left out of the plan. */
+  skippedWaypoints: string[];
 }
 
 /**

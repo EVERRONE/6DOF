@@ -1,5 +1,17 @@
 # 6DOF Robot Arm Control System - AI Coding Specification
 
+> [!NOTE]
+> **Historical document.** This was written against an earlier version of the
+> project and no longer describes the code. The DH-based kinematics and the
+> single-target step generator it refers to have both been replaced, and several
+> of its claims about behaviour and test coverage no longer hold.
+>
+> It is kept for the design history. For how the system works now see
+> [docs/KINEMATICS.md](docs/KINEMATICS.md),
+> [docs/SERIAL_PROTOCOL.md](docs/SERIAL_PROTOCOL.md) and
+> [firmware/README.md](firmware/README.md).
+
+
 **Version**: 1.0  
 **Date**: February 2026  
 **Target Platform**: Web Application (React + TypeScript) + Teensy 4.1 Firmware  

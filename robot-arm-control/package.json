@@ -52,5 +52,11 @@
   "devDependencies": {
     "@types/three": "^0.182.0",
     "tailwindcss": "^3.4.19"
+  },
+  "jest": {
+    "transformIgnorePatterns": [
+      "[/\\\\]node_modules[/\\\\](?!(three|@react-three)[/\\\\]).+\\.(js|jsx|mjs|cjs|ts|tsx)$",
+      "^.+\\.module\\.(css|sass|scss)$"
+    ]
   }
 }

@@ -58,21 +58,25 @@ export class TrajectoryPlanner {
 
     // Resolve all waypoints to joint angles
     const waypointAngles: number[][] = [];
+    const resolvedWaypoints: Waypoint[] = [];
+    const skippedWaypoints: string[] = [];
     let currentAngles = [...startAngles];
 
     for (const waypoint of waypoints) {
       const resolved = this.interpolator.resolveWaypointAngles(waypoint, currentAngles);
       if (!resolved) {
-        console.warn(`Failed to resolve waypoint: ${waypoint.label || waypoint.id}`);
-        // Skip unreachable waypoints
+        // Report it rather than only logging: a silently dropped waypoint means
+        // the arm runs a different path than the operator laid out.
+        skippedWaypoints.push(waypoint.label || waypoint.id);
         continue;
       }
       waypointAngles.push(resolved);
+      resolvedWaypoints.push(waypoint);
       currentAngles = resolved;
     }
 
     if (waypointAngles.length === 0) {
-      return this.createEmptyTrajectory(waypoints);
+      return { ...this.createEmptyTrajectory(waypoints), skippedWaypoints };
     }
 
     // Plan segments between consecutive waypoints
@@ -82,7 +86,7 @@ export class TrajectoryPlanner {
 
     for (let i = 0; i < waypointAngles.length; i++) {
       const endAngles = waypointAngles[i];
-      const waypoint = waypoints[i];
+      const waypoint = resolvedWaypoints[i];
       const speed = waypoint.speed || this.config.defaultSpeed;
 
       let segment: TrajectorySegment;
@@ -97,11 +101,16 @@ export class TrajectoryPlanner {
           this.config.pointsPerSecond
         );
       } else {
-        // Joint space interpolation
+        // Joint space interpolation.
+        //
+        // The waypoint's own feed rate is used here, falling back to the config
+        // default. It used to pass config.maxJointSpeed unconditionally, so the
+        // per-waypoint speed control did nothing at all in joint mode - which is
+        // the default mode.
         segment = this.interpolator.interpolateJointSpace(
           segStartAngles,
           endAngles,
-          this.config.maxJointSpeed,
+          Math.min(speed, this.config.maxJointSpeed),
           this.config.maxJointAcceleration,
           this.config.pointsPerSecond
         );
@@ -127,13 +136,19 @@ export class TrajectoryPlanner {
     const totalDuration = segments.reduce((sum, s) => sum + s.duration, 0);
     const totalDistance = segments.reduce((sum, s) => sum + s.distance, 0);
     const pointCount = segments.reduce((sum, s) => sum + s.points.length, 0);
+    const unreachableSamples = segments.reduce(
+      (sum, s) => sum + (s.unreachableSamples ?? 0),
+      0
+    );
 
     return {
       segments,
       totalDuration,
       totalDistance,
       pointCount,
-      waypoints
+      waypoints,
+      unreachableSamples,
+      skippedWaypoints
     };
   }
 
@@ -241,7 +256,9 @@ export class TrajectoryPlanner {
       totalDuration: 0,
       totalDistance: 0,
       pointCount: 0,
-      waypoints
+      waypoints,
+      unreachableSamples: 0,
+      skippedWaypoints: []
     };
   }
 }
