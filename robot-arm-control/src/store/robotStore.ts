@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { JointAngles, EndstopState, ConnectionStatus, RobotState } from '../types/robot';
 import { SerialManager } from '../communication/SerialManager';
+import { FirmwareState, FirmwareStatus } from '../communication/types';
 import { Vector3, IKResult } from '../kinematics/types';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
@@ -25,6 +26,11 @@ interface RobotStore {
   targetAngles: JointAngles;
   endstopState: EndstopState;
   motorsEnabled: boolean;
+
+  /** Last STATUS line from the firmware: queue space, homed flags, trust. */
+  firmwareStatus: FirmwareStatus | null;
+  /** When that STATUS arrived, used to tell a fresh report from a stale one. */
+  firmwareStatusAt: number;
 
   // Kinematics state
   currentPosition: Vector3 | null;
@@ -89,6 +95,41 @@ let trajectoryPlanner = new TrajectoryPlanner();
 let executionAbortController: AbortController | null = null;
 let executionPaused = false;
 
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+/** Map the firmware's reported state onto the UI's state enum. */
+function toRobotState(state: FirmwareState): RobotState {
+  switch (state) {
+    case 'MOVING': return RobotState.MOVING;
+    case 'HOMING': return RobotState.HOMING;
+    case 'ERROR': return RobotState.ERROR;
+    case 'ESTOP': return RobotState.ESTOPPED;
+    case 'IDLE':
+    default: return RobotState.IDLE;
+  }
+}
+
+/** Which trajectory segment a flattened point index falls in. */
+function locateSegment(
+  trajectory: Trajectory,
+  globalIndex: number
+): { segment: number; pointInSegment: number; pointsInSegment: number } {
+  let remaining = globalIndex;
+  for (let s = 0; s < trajectory.segments.length; s++) {
+    const count = trajectory.segments[s].points.length;
+    if (remaining < count) {
+      return { segment: s, pointInSegment: remaining, pointsInSegment: count };
+    }
+    remaining -= count;
+  }
+  const last = Math.max(0, trajectory.segments.length - 1);
+  return {
+    segment: last,
+    pointInSegment: 0,
+    pointsInSegment: trajectory.segments[last]?.points.length ?? 0
+  };
+}
+
 const initialProgress: ExecutionProgress = {
   state: ExecutionState.IDLE,
   currentSegment: 0,
@@ -109,6 +150,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   targetAngles: { J1: 0, J2: 0, J3: 0, J4: 0, J5: 0, J6: 0 },
   endstopState: { J1: false, J2: false, J3: false, J4: false, J5: false, J6: false },
   motorsEnabled: false,
+  firmwareStatus: null,
+  firmwareStatusAt: 0,
   currentPosition: null,
   targetPosition: null,
   ikStatus: null,
@@ -142,11 +185,16 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
           case 'ENDSTOP':
             set({ endstopState: msg.data });
             break;
-          case 'HOMED':
-            set({ robotState: RobotState.IDLE });
+          case 'STATUS':
+            // The firmware is the authority on whether the arm is moving: it
+            // still has queued moves to run after the last command was accepted.
+            set({
+              firmwareStatus: msg.data,
+              firmwareStatusAt: msg.timestamp,
+              robotState: toRobotState(msg.data.state)
+            });
             break;
           case 'ERROR':
-            set({ robotState: RobotState.ERROR });
             console.error('Robot error:', msg.data);
             break;
         }
@@ -157,8 +205,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         connectionStatus: ConnectionStatus.CONNECTED
       });
 
-      // Query initial position
-      await manager.queryPosition();
+      // Ask for an immediate position, endstop and status report.
+      await manager.queryStatus();
 
     } catch (error) {
       set({ connectionStatus: ConnectionStatus.ERROR });
@@ -190,8 +238,12 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const { serialManager, targetAngles, manualSpeed } = get();
     if (!serialManager) return;
 
+    const ack = await serialManager.moveToAngles(targetAngles, manualSpeed);
+    if (!ack.accepted) {
+      console.warn('Move rejected: firmware queue full');
+      return;
+    }
     set({ robotState: RobotState.MOVING });
-    await serialManager.moveToAngles(targetAngles, manualSpeed);
   },
 
   // Home joints
@@ -214,12 +266,17 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
   // Emergency stop
   emergencyStop: async () => {
-    const { serialManager, executionState } = get();
+    const { serialManager } = get();
 
-    // Cancel any running trajectory
-    if (executionState === ExecutionState.EXECUTING || executionState === ExecutionState.PAUSED) {
-      get().cancelExecution();
-    }
+    // Stop the sender without going through cancelExecution, which would send a
+    // graceful abort first - pointless noise ahead of a hard stop.
+    executionAbortController?.abort();
+    executionPaused = false;
+
+    set({
+      executionState: ExecutionState.IDLE,
+      executionProgress: { ...initialProgress }
+    });
 
     if (!serialManager) return;
 
@@ -278,28 +335,31 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     // Store IK status for UI feedback
     set({ ikStatus: ikResult });
 
-    if (ikResult.success) {
-      // Convert solution to JointAngles format
-      const targetAngles: JointAngles = {
-        J1: ikResult.jointAngles[0],
-        J2: ikResult.jointAngles[1],
-        J3: ikResult.jointAngles[2],
-        J4: ikResult.jointAngles[3],
-        J5: ikResult.jointAngles[4],
-        J6: ikResult.jointAngles[5]
-      };
-
-      // Send move command to robot
-      set({
-        robotState: RobotState.MOVING,
-        targetAngles: targetAngles
-      });
-
-      await serialManager.moveToAngles(targetAngles, manualSpeed);
-    } else {
-      console.error('IK failed:', ikResult.error);
-      alert(`Inverse kinematics failed: ${ikResult.error}`);
+    if (!ikResult.success) {
+      // The Cartesian panel renders ikStatus, including the residual, so there is
+      // no need to interrupt with a modal dialog.
+      console.warn('IK failed:', ikResult.error);
+      return;
     }
+
+    const targetAngles: JointAngles = {
+      J1: ikResult.jointAngles[0],
+      J2: ikResult.jointAngles[1],
+      J3: ikResult.jointAngles[2],
+      J4: ikResult.jointAngles[3],
+      J5: ikResult.jointAngles[4],
+      J6: ikResult.jointAngles[5]
+    };
+
+    set({ targetAngles });
+
+    const ack = await serialManager.moveToAngles(targetAngles, manualSpeed);
+    if (!ack.accepted) {
+      console.warn('Move rejected: firmware queue full');
+      return;
+    }
+
+    set({ robotState: RobotState.MOVING });
   },
 
   // ===== WAYPOINT ACTIONS =====
@@ -458,31 +518,83 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const startTime = Date.now();
     const loopCount = get().plannerConfig.loopCount;
     const iterations = loopCount > 0 ? loopCount : 1;
+    const speed = get().plannerConfig.maxJointSpeed;
+
+    const aborted = () => executionAbortController?.signal.aborted ?? true;
+
+    const stopAndReset = () => {
+      set({
+        executionState: ExecutionState.IDLE,
+        robotState: RobotState.IDLE,
+        executionProgress: { ...initialProgress }
+      });
+    };
+
+    /**
+     * Push one point into the firmware queue, waiting for space if the queue is
+     * full.
+     *
+     * The firmware owns the timing now: it plans a continuous velocity profile
+     * across everything it holds, so the host's job is to keep the queue fed, not
+     * to pace points off its own clock. The previous version slept
+     * min(dt, 200) ms between points, which both drifted from the planned
+     * trajectory and kept the queue shallow, so the arm restarted from a standstill
+     * at every point.
+     */
+    const sendPoint = async (angles: JointAngles): Promise<boolean> => {
+      for (let attempt = 0; attempt < 2000; attempt++) {
+        if (aborted()) return false;
+
+        const ack = await serialManager.moveToAngles(angles, speed);
+        if (ack.accepted) return true;
+
+        // Queue full: normal back-pressure. Wait for the arm to consume a move.
+        await sleep(20);
+      }
+      throw new Error('Firmware motion queue never drained');
+    };
+
+    /** Wait for a status report, issued after `since`, that says the arm is idle. */
+    const waitUntilIdle = async (since: number): Promise<void> => {
+      for (let attempt = 0; attempt < 3000; attempt++) {
+        if (aborted()) return;
+
+        const { firmwareStatus, firmwareStatusAt } = get();
+        if (firmwareStatus && firmwareStatusAt > since && firmwareStatus.state === 'IDLE') {
+          return;
+        }
+        await sleep(20);
+      }
+    };
 
     try {
       for (let loop = 0; loop < iterations; loop++) {
         for (let i = 0; i < allPoints.length; i++) {
-          // Check for abort
-          if (executionAbortController.signal.aborted) {
-            set({
-              executionState: ExecutionState.IDLE,
-              robotState: RobotState.IDLE,
-              executionProgress: { ...initialProgress }
-            });
+          if (aborted()) {
+            stopAndReset();
             return;
           }
 
-          // Wait while paused
-          while (executionPaused) {
-            if (executionAbortController.signal.aborted) {
-              set({
-                executionState: ExecutionState.IDLE,
-                robotState: RobotState.IDLE,
-                executionProgress: { ...initialProgress }
-              });
+          // Pausing has to stop the arm as well as the sender: the firmware is
+          // holding queued moves that would otherwise keep running. The abort is
+          // issued from here rather than from pauseExecution() so that it can
+          // never land while a move acknowledgement is in flight.
+          if (executionPaused) {
+            await serialManager.abort().catch(() => undefined);
+
+            while (executionPaused) {
+              if (aborted()) {
+                stopAndReset();
+                return;
+              }
+              await sleep(100);
+            }
+
+            if (aborted()) {
+              stopAndReset();
               return;
             }
-            await new Promise(resolve => setTimeout(resolve, 100));
+            // Nothing is skipped: this point has not been sent yet.
           }
 
           const point = allPoints[i];
@@ -495,47 +607,41 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
             J6: point.jointAngles[5]
           };
 
-          // Send to robot
-          await serialManager.moveToAngles(angles, get().plannerConfig.maxJointSpeed);
-
-          // Determine which segment we're in
-          let segIdx = 0;
-          let pointInSeg = i;
-          let pointsInSeg = allPoints.length;
-          for (let s = 0; s < trajectory.segments.length; s++) {
-            if (pointInSeg < trajectory.segments[s].points.length) {
-              segIdx = s;
-              pointsInSeg = trajectory.segments[s].points.length;
-              break;
-            }
-            pointInSeg -= trajectory.segments[s].points.length;
+          if (!(await sendPoint(angles))) {
+            stopAndReset();
+            return;
           }
 
+          const where = locateSegment(trajectory, i);
           const elapsedTime = (Date.now() - startTime) / 1000;
-          const overallProgress = ((loop * allPoints.length + i + 1) / (iterations * allPoints.length)) * 100;
+          const sent = loop * allPoints.length + i + 1;
+          const overallProgress = (sent / (iterations * allPoints.length)) * 100;
 
           set({
             executionProgress: {
               state: ExecutionState.EXECUTING,
-              currentSegment: segIdx,
+              currentSegment: where.segment,
               totalSegments: trajectory.segments.length,
-              currentPointInSegment: pointInSeg,
-              totalPointsInSegment: pointsInSeg,
+              currentPointInSegment: where.pointInSegment,
+              totalPointsInSegment: where.pointsInSegment,
               overallProgress,
               elapsedTime,
-              estimatedTimeRemaining: Math.max(0, trajectory.totalDuration * iterations - elapsedTime)
+              estimatedTimeRemaining: Math.max(
+                0,
+                trajectory.totalDuration * iterations - elapsedTime
+              )
             }
           });
-
-          // Wait for next point timing
-          if (i < allPoints.length - 1) {
-            const nextTime = allPoints[i + 1].time;
-            const dt = (nextTime - point.time) * 1000; // ms
-            if (dt > 0) {
-              await new Promise(resolve => setTimeout(resolve, Math.min(dt, 200)));
-            }
-          }
         }
+      }
+
+      // Every point has been accepted, but the arm is still working through the
+      // queue. Wait for it to actually finish before reporting completion.
+      await waitUntilIdle(Date.now());
+
+      if (aborted()) {
+        stopAndReset();
+        return;
       }
 
       // Execution complete
@@ -550,6 +656,13 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       });
 
     } catch (error) {
+      // Cancelling mid-flight rejects the acknowledgement the sender was waiting
+      // on, which lands here. That is a cancel, not a fault.
+      if (aborted()) {
+        stopAndReset();
+        return;
+      }
+
       console.error('Trajectory execution error:', error);
       set({
         executionState: ExecutionState.ERROR,
@@ -591,6 +704,16 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       executionAbortController.abort();
     }
     executionPaused = false;
+
+    // Stop the arm too, not just the sender: the firmware is holding queued moves
+    // that would otherwise keep running after the host stopped streaming. A
+    // graceful abort decelerates within the acceleration limit and keeps the
+    // position, unlike an emergency stop.
+    const { serialManager } = get();
+    if (serialManager) {
+      serialManager.abort().catch(error => console.error('Abort failed:', error));
+    }
+
     set({
       executionState: ExecutionState.IDLE,
       robotState: RobotState.IDLE,

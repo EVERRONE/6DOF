@@ -1,310 +1,244 @@
 # 6DOF Robot Arm - Serial Protocol Specification
 
-**Version:** 1.0
-**Date:** February 2026
-**Baud Rate:** 115200 8N1
+**Version:** 2.0
+**Transport:** USB CDC (Teensy 4.1). `Serial.begin(115200)` is nominal - the link
+runs at USB speed, so throughput is not a constraint.
 
 ---
 
 ## Overview
 
-The robot arm uses an ASCII-based serial protocol for communication between the web application and Teensy firmware. Commands are sent from the host (browser) to the robot, and responses/updates are sent from the robot back to the host.
+An ASCII line protocol. The host sends commands, the firmware sends replies and
+periodic reports. Every line is terminated with `\n`; a `\r` is tolerated and
+ignored.
+
+Two things drive the design and matter to any client:
+
+**The firmware owns motion timing.** It holds a queue of moves and plans a
+continuous velocity profile across them, so consecutive points are run as one
+motion instead of a stop at each one. The host's job is to keep that queue fed,
+not to pace points off its own clock.
+
+**Move commands are acknowledged, and the acknowledgement carries queue space.**
+That is the flow control: send, read the free-slot count, send more. When the
+queue is full the firmware answers `BUSY` and the host resends.
 
 ---
 
-## Command Format
+## Commands (host to firmware)
 
-All commands are ASCII strings terminated with a newline character (`\n`).
+### `J` - queue a joint move
 
-### General Structure
 ```
-<COMMAND_TYPE> [<ARGUMENTS>]\n
-```
-
----
-
-## Commands (Host → Robot)
-
-### 1. Move to Joint Angles (J)
-
-**Format:**
-```
-J <j1> <j2> <j3> <j4> <j5> <j6> <speed>
+J <j1> <j2> <j3> <j4> <j5> <j6> [speed]
 ```
 
-**Parameters:**
-- `j1` to `j6` - Target joint angles in degrees (float)
-- `speed` - Movement speed in degrees/second (float)
+| Field | Meaning |
+|-------|---------|
+| `j1`..`j6` | Absolute target angles in degrees. Clamped to `JOINT_MIN`/`JOINT_MAX`. |
+| `speed` | Optional, deg/s. Applies to the joint with the largest angular displacement, and is clamped to the per-joint limits in `config.h`. Omitted means `DEFAULT_SPEED`. |
 
-**Example:**
+Replies:
+
+```
+OK J <freeSlots>      queued; freeSlots is the room left afterwards
+BUSY <freeSlots>      queue full, nothing was queued - resend this move
+ERROR <reason>        rejected (see below)
+```
+
+`BUSY` is normal back-pressure while streaming, not a fault. Resend the same
+move after a short wait.
+
+Rejected when the motors are disabled, an emergency stop is latched, homing is in
+progress, or fewer than six angles were given.
+
 ```
 J 10.5 20.0 35.5 100.0 180.5 -45.0 30.0
+J 10.5 20.0 35.5 100.0 180.5 -45.0
 ```
 
-**Response:**
+> A move to the position already queued is accepted and discarded - it reports
+> `OK J` but occupies no queue slot.
+
+### `H` - home
+
 ```
-OK Moving
-```
-
-**Notes:**
-- Angles are automatically clamped to joint limits (defined in firmware config.h)
-- All joints move simultaneously (coordinated motion)
-- Movement completes when all joints reach target
-
----
-
-### 2. Home Joints (H)
-
-**Format:**
-```
-H <joints>
+H ALL          every joint that has an endstop, in order
+H 2            one joint
+H 2345         several joints, in the order given
 ```
 
-**Parameters:**
-- `joints` - Joint numbers to home (1-6), or "ALL"
+Reply: `OK Homing`, immediately. **Homing is asynchronous**; it does not block
+the controller, and position reports keep flowing throughout. Progress arrives as
+`HOMED <n>` per joint and `OK Homed` at the end, or `ERROR <reason>` on failure.
 
-**Examples:**
-```
-H 2          # Home joint 2 only
-H 2345       # Home joints 2, 3, 4, 5 in sequence
-H ALL        # Home all joints with endstops
-```
+Only joints with an endstop can be homed - J2 to J5 in the stock configuration.
+Asking for J1 or J6 is rejected.
 
-**Response (per joint):**
-```
-HOMED <joint_number>
-```
+Each joint is homed in four acceleration-limited moves: fast seek onto the
+switch, back-off, slow second approach for repeatability, then a move to the
+resting pose in `POST_HOME_ANGLES`.
 
-**Final Response:**
-```
-OK All joints homed    # (if H ALL was used)
-```
+Failure reasons:
 
-**Notes:**
-- Only joints with endstops can be homed (J2, J3, J4, J5)
-- Homing sequence: fast approach → back off → slow approach → set zero → move to post-home position
-- Joints are homed sequentially, not simultaneously
+| Reason | Meaning |
+|--------|---------|
+| `Endstop not found within travel limit` | Seek ran the whole `HOMING_MAX_TRAVEL` without the switch closing. Check wiring and the seek direction. |
+| `Endstop still closed after back-off` | The switch did not release. Stuck or miswired; homing stops rather than drive into the hard stop. |
+| `Endstop not found on fine approach` | The switch closed on the fast seek but not on the slow one. |
+| `Homing phase timed out` | A phase exceeded its watchdog. |
+| `Emergency stop during homing` | `S` arrived mid-run. |
 
-**Error Conditions:**
-- `ERROR No endstop on this joint` - Attempted to home J1 or J6
-- `ERROR Endstop not found` - Endstop not triggered within maximum travel
+### `Q` - query
 
----
-
-### 3. Query Position (Q)
-
-**Format:**
 ```
 Q
 ```
 
-**Response:**
-Immediately sends current position (same format as periodic POS messages).
+Sends `POS`, `ENDSTOP` and `STATUS` immediately.
 
-**Example:**
+### `E` - enable or disable the drivers
+
 ```
-POS 10.50 20.00 35.50 100.00 180.50 -45.00
-```
-
----
-
-### 4. Enable/Disable Motors (E)
-
-**Format:**
-```
-E <state>
+E 1     energise
+E 0     de-energise
 ```
 
-**Parameters:**
-- `state` - `1` to enable, `0` to disable
+Replies `OK Motors enabled` / `OK Motors disabled`.
 
-**Examples:**
-```
-E 1    # Enable motors
-E 0    # Disable motors
-```
+`E 1` also clears a latched emergency stop. `E 0` stops motion first, then cuts
+the drivers - on a geared arm that means it can sag under its own weight.
 
-**Response:**
-```
-OK Motors enabled     # or
-OK Motors disabled
-```
+### `S` - emergency stop
 
-**Notes:**
-- Motors are disabled on startup for safety
-- Disabling motors immediately stops any ongoing motion
-
----
-
-### 5. Emergency Stop (S)
-
-**Format:**
 ```
 S
 ```
 
-**Response:**
+Reply: `OK Emergency stop`.
+
+Cuts step generation immediately and drops the queue. The drivers stay
+energised, because de-energising them would let the arm fall. Stopping from speed
+without a ramp can lose steps, so this clears the position-trusted flag and the
+arm should be re-homed. The stop stays latched until `E 1`.
+
+### `A` - abort
+
 ```
-OK Emergency stop
+A
 ```
 
-**Behavior:**
-- Immediately halts all joint motion
-- Sets target position to current position
-- Does NOT disable motors (they remain holding position)
-- Robot state becomes ESTOPPED
+Reply: `OK Aborted`.
+
+Decelerates to a stop within the normal acceleration limit, then drops the queue.
+Position stays trusted. This is the right stop for a user-requested cancel or
+pause; `S` is for emergencies.
 
 ---
 
-## Responses (Robot → Host)
+## Reports (firmware to host)
 
-### Position Update (POS)
+Sent every `REPORT_INTERVAL_MS` (50 ms by default), and on demand after `Q`. If
+the host is not draining the port, a round is skipped rather than blocking the
+control loop.
 
-**Format:**
+### `POS`
+
 ```
 POS <j1> <j2> <j3> <j4> <j5> <j6>
 ```
 
-**Example:**
+Current joint angles in degrees, two decimals. **Live during motion** - the
+angles are read from the live step counters, so the host tracks the arm as it
+moves.
+
+### `ENDSTOP`
+
 ```
-POS 0.00 5.00 55.00 129.00 220.00 0.00
+ENDSTOP <e1> <e2> <e3> <e4> <e5> <e6>
 ```
 
-**Update Rate:**
-- Sent automatically every 100ms
-- Also sent immediately in response to `Q` command
+`1` = switch closed, `0` = open. Debounced. Joints without a switch always
+report `0`.
 
-**Precision:**
-- 2 decimal places
+### `STATUS`
+
+```
+STATUS <state> <queueFree> <moving> <positionTrusted> <homedMask>
+```
+
+| Field | Meaning |
+|-------|---------|
+| `state` | `IDLE`, `MOVING`, `HOMING`, `ERROR` or `ESTOP` |
+| `queueFree` | Free slots in the motion queue |
+| `moving` | `1` while step generation is active |
+| `positionTrusted` | `0` when a hard stop may have lost steps, or the arm has not been fully homed |
+| `homedMask` | Bit *i* set means joint *i+1* has a datum. `30` = J2..J5 |
+
+`state` is `IDLE` only when the queue is empty **and** the arm has stopped, so it
+is the correct thing to wait on for "motion finished". Note that a `STATUS` can
+be in flight when a move is queued, so wait for a report timestamped after the
+last command rather than acting on the first `IDLE` seen.
+
+### Other lines
+
+```
+OK <text>              command accepted
+ERROR <text>           command rejected, or an asynchronous fault
+HOMED <n>              joint n finished homing (1-based)
+OK Robot arm ready     sent once at start-up
+```
+
+`ERROR Command too long` means a line exceeded the receive buffer and was
+dropped; the parser resynchronises at the next newline.
 
 ---
 
-### Endstop State (ENDSTOP)
+## Streaming a trajectory
 
-**Format:**
 ```
-ENDSTOP <j1> <j2> <j3> <j4> <j5> <j6>
+1. E 1
+2. H ALL, wait for "OK Homed"
+3. For each point:
+     send  J <angles> <speed>
+     read  OK J <free>   -> continue
+           BUSY <free>   -> wait ~20 ms, resend the same point
+4. Wait for a STATUS with state=IDLE, timestamped after the last command.
 ```
 
-**Values:**
-- `0` - Endstop not triggered
-- `1` - Endstop triggered
+Do not sleep between points to pace them. The firmware's planner produces the
+timing, and a shallow queue is what forces it to decelerate to a stop at each
+point. Keeping the queue full is the whole mechanism by which a streamed path
+comes out smooth.
 
-**Example:**
-```
-ENDSTOP 0 1 0 0 0 0
-```
-(J2 endstop is currently triggered)
+The queue holds `MOTION_QUEUE_LENGTH - 1` moves (23 by default). The firmware
+also waits briefly - `START_QUEUE_DEPTH` moves or `START_DELAY_MS` - before
+starting, so that a stream has look-ahead from the very first move. A single jog
+command still starts within `START_DELAY_MS`.
 
-**Update Rate:**
-- Sent automatically every 100ms
+### Corner behaviour
+
+Junction speed scales with the cosine of the turn angle in joint space:
+collinear moves run through at full speed, a reversal stops, and a right-angle
+corner stops as well. That last one is deliberate - carrying speed through a
+sharp corner would need a step change in a joint's velocity, which is the jolt
+the planner exists to remove. A finely sampled path never hits it, because
+consecutive points are nearly collinear.
 
 ---
 
-### Homing Complete (HOMED)
+## Changes from version 1.0
 
-**Format:**
-```
-HOMED <joint_number>
-```
+| Area | Was | Now |
+|------|-----|-----|
+| `J` reply | `OK Moving` | `OK J <free>` / `BUSY <free>`, so the host can apply back-pressure |
+| Motion model | one target, recomputed per command | queue with look-ahead planning |
+| `speed` argument | required | optional |
+| Homing | blocking; froze the controller for the whole run | asynchronous state machine |
+| `POS` during a move | stale; only refreshed when a move finished | live |
+| `STATUS` | did not exist | queue space, homed flags, position trust |
+| `A` (abort) | did not exist | graceful decelerate-and-clear |
+| Position trust | not tracked | cleared by a hard stop, set by homing |
 
-**Example:**
-```
-HOMED 2
-```
-
-**Notes:**
-- `joint_number` is 1-indexed (1 = J1, 2 = J2, etc.)
-- Sent when a joint successfully completes its homing sequence
-
----
-
-### Acknowledgment (OK)
-
-**Format:**
-```
-OK <message>
-```
-
-**Examples:**
-```
-OK Robot arm ready
-OK Motors enabled
-OK Moving
-OK Emergency stop
-OK All joints homed
-```
-
----
-
-### Error (ERROR)
-
-**Format:**
-```
-ERROR <message>
-```
-
-**Examples:**
-```
-ERROR Unknown command
-ERROR Invalid move command format
-ERROR No endstop on this joint
-ERROR Endstop not found
-```
-
----
-
-## Message Flow Examples
-
-### Example 1: Connect and Move Joint
-
-**Host → Robot:**
-```
-E 1
-```
-
-**Robot → Host:**
-```
-OK Motors enabled
-```
-
-**Host → Robot:**
-```
-J 15 0 0 0 0 0 20
-```
-
-**Robot → Host:**
-```
-OK Moving
-```
-
-**Robot → Host (periodic updates while moving):**
-```
-POS 3.25 0.00 0.00 0.00 0.00 0.00
-ENDSTOP 0 0 0 0 0 0
-POS 6.50 0.00 0.00 0.00 0.00 0.00
-ENDSTOP 0 0 0 0 0 0
-...
-POS 15.00 0.00 0.00 0.00 0.00 0.00
-ENDSTOP 0 0 0 0 0 0
-```
-
----
-
-## Future Extensions
-
-Potential future commands (not yet implemented):
-
-- `C <x> <y> <z> <rx> <ry> <rz> <speed>` - Move to Cartesian coordinates (requires IK)
-- `P <path_id>` - Execute predefined path
-- `G <gcode>` - Execute G-code command
-- `T <tool_state>` - Control end-effector tool
-
----
-
-## Changelog
-
-**v1.0 (2026-02-09)**
-- Initial protocol specification
-- Implemented: J, H, Q, E, S commands
-- Implemented: POS, ENDSTOP, HOMED, OK, ERROR responses
+A version 1.0 client that sends `J ... <speed>` and reads `POS`/`ENDSTOP` still
+works, except that it must tolerate `OK J <n>` where it expected `OK Moving`.
