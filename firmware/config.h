@@ -158,6 +158,13 @@ const uint32_t START_DELAY_MS = 40;
 const bool HAS_ENDSTOP[NUM_AXES] = {false, true, true, true, true, false};
 
 // Direction of travel to find the endstop.
+//
+// !! UNRESOLVED: the hardware notes in docs/HARDWARE.md state
+// !! HOME_TOWARD_MIN as J2=true, J3=true, J4=true, J5=true, which disagrees
+// !! with the values below for J2, J4 and J5. One of the two is wrong and it
+// !! cannot be settled without the arm. Verify per joint before running H ALL:
+// !! home ONE joint and watch which way it goes. Getting this wrong drives the
+// !! joint away from its switch and into the opposite hard stop.
 const bool HOME_TOWARD_MIN[NUM_AXES] = {false, false, true, false, false, false};
 
 // Joint angle assigned once the endstop is found, and the resting pose the
@@ -169,8 +176,25 @@ const float HOMING_SPEED = 10.0f;       // deg/s, fast seek
 const float HOMING_FINE_SPEED = 2.0f;   // deg/s, second approach
 const float BACKOFF_DISTANCE = 2.0f;    // degrees to retract after triggering
 
-// Give up if the endstop has not triggered within this much travel.
-const float HOMING_MAX_TRAVEL = 360.0f; // degrees
+// Give up if the endstop has not triggered within this much travel, per joint.
+//
+// A joint cannot need more than its own range of travel to reach its switch,
+// whatever arbitrary position it powers up in. Sized as
+// (JOINT_MAX - JOINT_MIN) + 10 degrees of margin.
+//
+// This used to be a flat 360 degrees for every joint. J2 only travels 60
+// degrees in total, so a seek in the wrong direction - which is easy to
+// configure by accident, see HOME_TOWARD_MIN above - ground the joint against
+// its hard stop for 300 degrees before the firmware gave up. Bounding the seek
+// per joint turns that from destructive into a clean error.
+const float HOMING_MAX_TRAVEL[NUM_AXES] = {
+  80.0f,   // J1  range  70 deg (no endstop)
+  70.0f,   // J2  range  60 deg
+  80.0f,   // J3  range  70 deg
+  285.0f,  // J4  range 274 deg
+  290.0f,  // J5  range 280 deg
+  730.0f   // J6  range 720 deg (no endstop)
+};
 
 // Endstops are read in the main loop; a switch must read triggered this many
 // consecutive polls to count. Cheap debounce against contact bounce and noise.

@@ -41,6 +41,8 @@ export enum ConnectionStatus {
   DISCONNECTED = 'disconnected',
   CONNECTING = 'connecting',
   CONNECTED = 'connected',
+  /** Link dropped unexpectedly; the manager is trying to reopen the port. */
+  RECONNECTING = 'reconnecting',
   ERROR = 'error'
 }
 

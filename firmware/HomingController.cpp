@@ -196,7 +196,7 @@ void HomingController::update() {
       // A long move toward the switch. It is deliberately not clamped to the
       // joint limits, because before homing the recorded position is arbitrary;
       // the switch is the limit here.
-      if (stepper_.queueAxisMove(axis, seekDirection(axis) * HOMING_MAX_TRAVEL,
+      if (stepper_.queueAxisMove(axis, seekDirection(axis) * HOMING_MAX_TRAVEL[axis],
                                  HOMING_SPEED)) {
         enterPhase(PHASE_SEEK);
       }
@@ -212,7 +212,7 @@ void HomingController::update() {
         return;
       }
       if (stepper_.isIdle()) {
-        fail("Endstop not found within travel limit");
+        fail("Endstop not found in travel range, check HOME_TOWARD_MIN direction");
       }
       return;
     }

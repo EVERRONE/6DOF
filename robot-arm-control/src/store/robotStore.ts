@@ -18,6 +18,8 @@ import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG } from '../motion/TrajectoryP
 interface RobotStore {
   // Connection
   connectionStatus: ConnectionStatus;
+  /** Why the link is down, or what the manager is doing about it. */
+  connectionDetail: string | null;
   serialManager: SerialManager | null;
 
   // Robot state
@@ -144,6 +146,7 @@ const initialProgress: ExecutionProgress = {
 export const useRobotStore = create<RobotStore>((set, get) => ({
   // Initial state
   connectionStatus: ConnectionStatus.DISCONNECTED,
+  connectionDetail: null,
   serialManager: null,
   robotState: RobotState.IDLE,
   currentAngles: { J1: 0, J2: 0, J3: 0, J4: 0, J5: 0, J6: 0 },
@@ -167,14 +170,35 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
   // Connect to robot
   connect: async () => {
-    const manager = new SerialManager();
+    // Reuse the existing manager if there is one, so its listeners and
+    // reconnect state are not duplicated.
+    const manager = get().serialManager ?? new SerialManager();
+    const isNew = manager !== get().serialManager;
 
-    set({ connectionStatus: ConnectionStatus.CONNECTING });
+    set({ serialManager: manager, connectionDetail: null });
 
-    try {
-      await manager.connect();
+    if (isNew) {
+      manager.onStateChange((state, detail) => {
+        set({ connectionStatus: state, connectionDetail: detail ?? null });
 
-      // Subscribe to messages
+        if (state === ConnectionStatus.CONNECTED) return;
+
+        // The link is down, so nothing about the arm is known any more. Abandon
+        // any running path rather than let it resume against a controller that
+        // has restarted in the meantime.
+        executionAbortController?.abort();
+        executionPaused = false;
+
+        set({
+          firmwareStatus: null,
+          firmwareStatusAt: 0,
+          motorsEnabled: false,
+          robotState: RobotState.IDLE,
+          executionState: ExecutionState.IDLE,
+          executionProgress: { ...initialProgress }
+        });
+      });
+
       manager.onMessage((msg) => {
         switch (msg.type) {
           case 'POS':
@@ -199,30 +223,35 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
             break;
         }
       });
-
-      set({
-        serialManager: manager,
-        connectionStatus: ConnectionStatus.CONNECTED
-      });
-
-      // Ask for an immediate position, endstop and status report.
-      await manager.queryStatus();
-
-    } catch (error) {
-      set({ connectionStatus: ConnectionStatus.ERROR });
-      throw error;
     }
+
+    // The manager reports CONNECTING, CONNECTED and every later transition
+    // through onStateChange, including a loss while this call is in flight.
+    await manager.connect();
   },
 
   // Disconnect
   disconnect: async () => {
     const { serialManager } = get();
+
+    executionAbortController?.abort();
+    executionPaused = false;
+
     if (serialManager) {
       await serialManager.disconnect();
+      serialManager.dispose();
     }
+
     set({
       serialManager: null,
-      connectionStatus: ConnectionStatus.DISCONNECTED
+      connectionStatus: ConnectionStatus.DISCONNECTED,
+      connectionDetail: null,
+      firmwareStatus: null,
+      firmwareStatusAt: 0,
+      motorsEnabled: false,
+      robotState: RobotState.IDLE,
+      executionState: ExecutionState.IDLE,
+      executionProgress: { ...initialProgress }
     });
   },
 

@@ -802,6 +802,15 @@ static void testHomingMissingEndstop() {
   printf("        reported: %s\n", homing.lastError());
   pass("a missing endstop fails cleanly instead of hanging");
 
+  // The seek must be bounded by the joint's own range, not a flat 360 degrees:
+  // a wrong-direction seek used to grind J2 against its hard stop for 300 of
+  // them before giving up.
+  const double sought = std::fabs((double)mock::hw.motorSteps[1]) / USTEPS_PER_DEG[1];
+  printf("        travel before giving up: %.0f deg (joint range %.0f deg)\n",
+         sought, (double)(JOINT_MAX[1] - JOINT_MIN[1]));
+  CHECK(sought <= HOMING_MAX_TRAVEL[1] + 1.0);
+  pass("the seek is bounded by the joint's own range of travel");
+
   CHECK(!homing.isBusy());
   CHECK(homing.consumeFailure());
   CHECK(!homing.consumeFailure());
