@@ -111,7 +111,7 @@ describe('robot model', () => {
     // If the solver works in a different box, the firmware clamps the solution
     // and the arm goes somewhere the solver never asked for.
     expect(JOINT_LIMITS_DEG.min).toEqual([-40, 0, 0, 0, 0, -360]);
-    expect(JOINT_LIMITS_DEG.max).toEqual([30, 60, 70, 274, 280, 360]);
+    expect(JOINT_LIMITS_DEG.max).toEqual([30, 60, 70, 274, 165, 360]);
   });
 
   it('places the documented home pose inside the limits', () => {

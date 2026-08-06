@@ -68,23 +68,47 @@ const bool INVERT_DIR[NUM_AXES] = {false, false, true, true, true, false};
 // exact values. Change both together, or the solver will hand over angles the
 // firmware silently clamps.
 
+// The limits were recorded in the same scale as the old USTEPS_PER_DEG, so
+// correcting the calibration moves where each number sits physically. The hard
+// stop itself does not move: at the stop the step count is fixed, so the honest
+// conversion is limit_new = limit_old * scale.
+//
+// That widens J3 (70 -> 77.8) and J4 (274 -> 353.2) and narrows J5 (280 ->
+// 165.2). Where the conversion widens a limit, the old number is kept: it is
+// not known whether these came from measurement or from the same notes as the
+// wrong gear ratios, and a limit that is too tight only costs travel, while one
+// that is too generous drives into the stop. Open J3 and J4 up once the real
+// travel has been measured against the arm.
 const float JOINT_MIN[NUM_AXES] = {-40, 0, 0, 0, 0, -360};
-const float JOINT_MAX[NUM_AXES] = {30, 60, 70, 274, 280, 360};
+const float JOINT_MAX[NUM_AXES] = {30, 60, 70, 274, 165, 360};
 
 // ---------------------------------------------------------------------------
 // Calibration
 // ---------------------------------------------------------------------------
 
 // Microsteps per degree of joint travel (1/16 microstepping, including the
-// gear reduction). Implied reductions: J1 6.3:1, J2 25:1, J3 6.3:1,
-// J4 3.7:1, J5 2:1, J6 1:1.
+// gear reduction).
+//
+// Measured, not derived. The original values came from documented gear pairings
+// and were wrong on three axes; these fold in the scale factors from an earlier
+// calibration of this same arm (logical = raw * scale, so the true figure is
+// the old one divided by scale).
+//
+// J5 is the striking one: its gear pairing was never recorded, so 2:1 was a
+// guess, and it is really 3.39:1. J3 is a 16:90 pair rather than the assumed
+// 16:100 - 5.625:1 against 6.25:1, two pairings that look nearly identical on
+// the machine.
+//
+// Cross-checked independently: applying these scales to the angles this
+// firmware reports at the parked pose reproduces the home pose recorded by the
+// earlier project to within 0.0 deg on J4, 1.0 on J5 and 1.1 on J3.
 const float USTEPS_PER_DEG[NUM_AXES] = {
-  55.556,   // J1
-  222.222,  // J2
-  55.556,   // J3
-  33.333,   // J4
-  17.778,   // J5
-  8.889     // J6
+  55.556,   // J1   6.250:1
+  222.222,  // J2  25.000:1
+  50.000,   // J3   5.625:1  (was 55.556, assumed 6.25:1)
+  25.862,   // J4   2.909:1  (was 33.333, assumed 3.75:1)
+  30.132,   // J5   3.390:1  (was 17.778, assumed 2:1 - never recorded)
+  8.889     // J6   1.000:1
 };
 
 // ---------------------------------------------------------------------------
@@ -191,7 +215,12 @@ const bool HOME_TOWARD_MIN[NUM_AXES] = {false, true, true, true, true, false};
 // Joint angle assigned once the endstop is found, and the resting pose the
 // joint is moved to afterwards.
 const float HOME_POSITION[NUM_AXES] = {0, 0, 0, 0, 0, 0};
-const float POST_HOME_ANGLES[NUM_AXES] = {0, 5, 55, 129, 220, 0};
+
+// Where the arm parks after homing. Measured on the arm: it was jogged into the
+// wanted pose and these are the angles reported there, rescaled by the
+// calibration above. They agree with the operational home pose recorded by the
+// earlier project on this machine to within 2 degrees on every axis.
+const float POST_HOME_ANGLES[NUM_AXES] = {0, 15.0f, 41.1f, 165.0f, 131.0f, 0};
 
 // Also reduced for bring-up: a seek in the wrong direction should crawl, not
 // run, so there is time to cut the power before it reaches the hard stop.
@@ -239,7 +268,7 @@ const float HOMING_MAX_TRAVEL[NUM_AXES] = {
   70.0f,   // J2  range  60 deg
   80.0f,   // J3  range  70 deg
   285.0f,  // J4  range 274 deg
-  290.0f,  // J5  range 280 deg
+  175.0f,  // J5  range 165 deg after the calibration correction
   730.0f   // J6  range 720 deg (no endstop)
 };
 

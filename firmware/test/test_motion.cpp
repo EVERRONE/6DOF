@@ -451,7 +451,16 @@ static void testExactPositioning() {
   stepper.begin();
   stepper.enable();
 
-  const JointAngles target = makeAngles(-12.5f, 33.0f, 41.25f, 100.0f, 175.0f, -90.0f);
+  // Derived from the limits rather than hardcoded. This test is about arriving
+  // exactly on the commanded target, so the target has to be inside the joint
+  // range - a hardcoded angle silently turns into a test of the clamp instead
+  // the moment a limit changes, which is what happened when J5's range was
+  // corrected from 280 to 165 degrees.
+  JointAngles target;
+  const float fractions[NUM_AXES] = {0.25f, 0.55f, 0.59f, 0.36f, 0.63f, 0.375f};
+  for (int i = 0; i < NUM_AXES; i++) {
+    target[i] = JOINT_MIN[i] + (JOINT_MAX[i] - JOINT_MIN[i]) * fractions[i];
+  }
   CHECK(stepper.queueMove(target, 30.0f));
   CHECK(sim.runUntilIdle(30.0));
 

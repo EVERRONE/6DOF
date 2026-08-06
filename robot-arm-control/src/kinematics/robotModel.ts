@@ -112,7 +112,7 @@ export const ROBOT_JOINTS: JointSpec[] = [
       xyz: { x: 0.0, y: -0.01002, z: 0.10323 },
       rpy: { roll: -1.5708, pitch: 1.5708, yaw: 0.0 }
     },
-    limitDeg: { min: 0, max: 280 }
+    limitDeg: { min: 0, max: 165 }
   },
   {
     name: 'Joint6',
@@ -173,7 +173,9 @@ export const JOINT_MAX_ACCEL_DEG_S2: number[] = [40, 25, 40, 60, 75, 100];
  * Post-homing rest pose in degrees, from firmware/config.h POST_HOME_ANGLES.
  * Used as the default IK seed because it is a known-good, non-singular pose.
  */
-export const HOME_POSE_DEG: number[] = [0, 5, 55, 129, 220, 0];
+// Mirrors POST_HOME_ANGLES in firmware/config.h: where the arm parks after
+// homing, measured on the machine rather than taken from the project notes.
+export const HOME_POSE_DEG: number[] = [0, 15.0, 41.1, 165.0, 131.0, 0];
 
 /** Centre of the joint range, a useful fallback seed. */
 export const MID_POSE_DEG: number[] = ROBOT_JOINTS.map(

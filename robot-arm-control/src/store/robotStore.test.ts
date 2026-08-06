@@ -80,13 +80,17 @@ function planShortPath(): number {
   const store = useRobotStore.getState();
   store.clearWaypoints();
   store.updatePlannerConfig({ interpolationMode: 'joint', pointsPerSecond: 4 });
-  store.addWaypoint(makeWaypoint([0, 12, 55, 129, 220, 0], 'a'));
-  store.addWaypoint(makeWaypoint([0, 20, 58, 129, 220, 0], 'b'));
+  store.addWaypoint(makeWaypoint([0, 12, 55, 129, 131, 0], 'a'));
+  store.addWaypoint(makeWaypoint([0, 20, 58, 129, 131, 0], 'b'));
   store.planTrajectory();
 
   const trajectory = useRobotStore.getState().trajectory;
   expect(trajectory).not.toBeNull();
-  return trajectory!.pointCount;
+  // What the sender actually emits is the flattened list, which drops the
+  // duplicated point where two segments meet. trajectory.pointCount counts that
+  // seam twice, so comparing against it only passed while the seam happened to
+  // fall on distinct timestamps.
+  return TrajectoryPlanner.flattenTrajectory(trajectory!).length;
 }
 
 beforeEach(() => {
@@ -497,7 +501,7 @@ describe('store: Cartesian moves', () => {
   it('sends the IK solution when the target is reachable', async () => {
     const { port } = await connectStore();
 
-    const target = ForwardKinematics.position([0, 10, 55, 129, 220, 0]);
+    const target = ForwardKinematics.position([0, 10, 55, 129, 131, 0]);
     await useRobotStore.getState().moveToPosition(target);
     await flush();
 
@@ -524,7 +528,9 @@ describe('store: Cartesian moves', () => {
   it('tracks the tool position from reported joint angles', async () => {
     const { port } = await connectStore();
 
-    port.push('POS 0.00 5.00 55.00 129.00 220.00 0.00\n');
+    // Report the home pose itself rather than a copy of its numbers, so the
+    // test keeps comparing like with like when the pose is recalibrated.
+    port.push(`POS ${HOME_POSE_DEG.map(v => v.toFixed(2)).join(' ')}\n`);
     await flush();
 
     const position = useRobotStore.getState().currentPosition;

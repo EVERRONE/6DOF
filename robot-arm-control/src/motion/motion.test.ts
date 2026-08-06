@@ -13,6 +13,7 @@ import { Waypoint } from './types';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import {
   HOME_POSE_DEG,
+  JOINT_LIMITS_DEG,
   JOINT_MAX_ACCEL_DEG_S2,
   JOINT_MAX_SPEED_DEG_S,
   NUM_JOINTS,
@@ -85,7 +86,7 @@ describe('joint-space interpolation', () => {
     // trapezoid. The samples were then not collinear, which also cost speed at
     // every one of them.
     const start = [...HOME_POSE_DEG];
-    const end = [0, 45, 60, 129, 220, 0];
+    const end = [0, 45, 60, 129, 131, 0];
     const distances = end.map((v, i) => v - start[i]);
 
     const segment = interp.interpolateJointSpace(start, end, 60, 120, 10);
@@ -102,7 +103,7 @@ describe('joint-space interpolation', () => {
 
   it('holds lockstep across very lopsided travel ratios', () => {
     const start = [...HOME_POSE_DEG];
-    const end = [-30, 6, 55, 250, 221, 300];
+    const end = [-30, 6, 55, 250, 160, 300];
     const distances = end.map((v, i) => v - start[i]);
 
     const segment = interp.interpolateJointSpace(start, end, 60, 120, 20);
@@ -117,7 +118,7 @@ describe('joint-space interpolation', () => {
 
   it('progresses monotonically from start to end', () => {
     const start = [...HOME_POSE_DEG];
-    const end = [0, 45, 60, 129, 220, 0];
+    const end = [0, 45, 60, 129, 131, 0];
     const segment = interp.interpolateJointSpace(start, end, 60, 120, 10);
 
     const first = segment.points[0];
@@ -138,7 +139,7 @@ describe('joint-space interpolation', () => {
   it('respects the per-joint speed and acceleration limits', () => {
     const start = [...HOME_POSE_DEG];
     // Ask for far more than any joint can deliver.
-    const end = [-40, 60, 70, 274, 280, 360];
+    const end = JOINT_LIMITS_DEG.max.map(v => v * 10);
 
     const segment = interp.interpolateJointSpace(start, end, 10000, 10000, 200);
 
@@ -164,7 +165,7 @@ describe('joint-space interpolation', () => {
 
   it('honours a requested speed below the hardware limit', () => {
     const start = [...HOME_POSE_DEG];
-    const end = [0, 45, 55, 129, 220, 0];
+    const end = [0, 45, 55, 129, 131, 0];
 
     // Both speeds have to sit below the axis limit, or the planner clamps them
     // to the same value and the comparison proves nothing. J2 is the only joint
@@ -181,7 +182,8 @@ describe('joint-space interpolation', () => {
   it('never leaves the joint limits', () => {
     const segment = interp.interpolateJointSpace(
       [...HOME_POSE_DEG],
-      [-40, 60, 70, 274, 280, 0],
+      // The extremes themselves, read from the limits rather than copied.
+      [...JOINT_LIMITS_DEG.max.slice(0, 5), 0],
       60,
       120,
       20
@@ -215,7 +217,7 @@ describe('linear (Cartesian) interpolation', () => {
 
   it('keeps the tool on the straight line between start and target', () => {
     // A nearby, reachable target: the pose with J2 five degrees further on.
-    const target = ForwardKinematics.position([0, 10, 55, 129, 220, 0]);
+    const target = ForwardKinematics.position([0, 10, 55, 129, 131, 0]);
 
     const segment = interp.interpolateCartesianSpace(start, target, 50, 100, 10);
     expect(segment.unreachableSamples ?? 0).toBe(0);
@@ -231,7 +233,7 @@ describe('linear (Cartesian) interpolation', () => {
   });
 
   it('bounds the chord between consecutive samples', () => {
-    const target = ForwardKinematics.position([0, 10, 55, 129, 220, 0]);
+    const target = ForwardKinematics.position([0, 10, 55, 129, 131, 0]);
     const segment = interp.interpolateCartesianSpace(start, target, 50, 100, 1);
 
     let worstChord = 0;
@@ -248,7 +250,7 @@ describe('linear (Cartesian) interpolation', () => {
   it('samples by arc length, not by time', () => {
     // Uniform-in-time sampling bunches points at the ends and spreads them at
     // cruise, which is where the deviation from the line would be worst.
-    const target = ForwardKinematics.position([0, 12, 55, 129, 220, 0]);
+    const target = ForwardKinematics.position([0, 12, 55, 129, 131, 0]);
     const segment = interp.interpolateCartesianSpace(start, target, 50, 100, 10);
 
     const chords: number[] = [];
@@ -346,9 +348,9 @@ describe('trajectory planner', () => {
   it('chains segments through every waypoint', () => {
     const planner = new TrajectoryPlanner({ interpolationMode: 'joint' });
     const waypoints = [
-      makeWaypoint([0, 15, 55, 129, 220, 0], 'a'),
-      makeWaypoint([0, 30, 60, 129, 220, 0], 'b'),
-      makeWaypoint([-10, 30, 60, 140, 220, 0], 'c')
+      makeWaypoint([0, 15, 55, 129, 131, 0], 'a'),
+      makeWaypoint([0, 30, 60, 129, 131, 0], 'b'),
+      makeWaypoint([-10, 30, 60, 140, 131, 0], 'c')
     ];
 
     const trajectory = planner.planTrajectory(waypoints, [...HOME_POSE_DEG]);
@@ -369,8 +371,8 @@ describe('trajectory planner', () => {
   it('produces a monotone timeline when flattened', () => {
     const planner = new TrajectoryPlanner({ interpolationMode: 'joint' });
     const waypoints = [
-      makeWaypoint([0, 15, 55, 129, 220, 0], 'a'),
-      makeWaypoint([0, 30, 60, 129, 220, 0], 'b')
+      makeWaypoint([0, 15, 55, 129, 131, 0], 'a'),
+      makeWaypoint([0, 30, 60, 129, 131, 0], 'b')
     ];
 
     const trajectory = planner.planTrajectory(waypoints, [...HOME_POSE_DEG]);
@@ -385,7 +387,7 @@ describe('trajectory planner', () => {
   it('keeps every planned point inside the joint limits', () => {
     const planner = new TrajectoryPlanner({ interpolationMode: 'joint' });
     const waypoints = [
-      makeWaypoint([-40, 60, 70, 274, 280, 0], 'extreme'),
+      makeWaypoint([...JOINT_LIMITS_DEG.max.slice(0, 5), 0], 'extreme'),
       makeWaypoint([30, 0, 0, 0, 0, 0], 'other end')
     ];
 
@@ -397,19 +399,19 @@ describe('trajectory planner', () => {
 
   it('gives a Cartesian preview that follows the tool path', () => {
     const planner = new TrajectoryPlanner({ interpolationMode: 'joint' });
-    const waypoints = [makeWaypoint([0, 20, 55, 129, 220, 0], 'a')];
+    const waypoints = [makeWaypoint([0, 20, 55, 129, 131, 0], 'a')];
 
     const trajectory = planner.planTrajectory(waypoints, [...HOME_POSE_DEG]);
     const positions = TrajectoryPlanner.getTrajectoryPositions(trajectory);
 
     expect(positions.length).toBeGreaterThan(1);
-    const expected = ForwardKinematics.position([0, 20, 55, 129, 220, 0]);
+    const expected = ForwardKinematics.position([0, 20, 55, 129, 131, 0]);
     expect(dist(positions[positions.length - 1], expected)).toBeLessThan(1e-9);
   });
 
   it('skips waypoints it cannot resolve, and says which', () => {
     const planner = new TrajectoryPlanner({ interpolationMode: 'joint' });
-    const reachable = makeWaypoint([0, 20, 55, 129, 220, 0], 'ok');
+    const reachable = makeWaypoint([0, 20, 55, 129, 131, 0], 'ok');
     const unreachable: Waypoint = {
       id: 'bad',
       position: { x: 5, y: 5, z: 5 },
@@ -429,7 +431,7 @@ describe('trajectory planner', () => {
     // target position entirely.
     const planner = new TrajectoryPlanner({ interpolationMode: 'joint' });
 
-    const first = makeWaypoint([0, 15, 55, 129, 220, 0], 'first');
+    const first = makeWaypoint([0, 15, 55, 129, 131, 0], 'first');
     first.speed = 60;
 
     const broken: Waypoint = {
@@ -439,7 +441,7 @@ describe('trajectory planner', () => {
       label: 'broken'
     };
 
-    const last = makeWaypoint([0, 35, 55, 129, 220, 0], 'last');
+    const last = makeWaypoint([0, 35, 55, 129, 131, 0], 'last');
     last.speed = 4; // deliberately slow, so a mix-up shows up in the duration
 
     const trajectory = planner.planTrajectory([first, broken, last], [...HOME_POSE_DEG]);
@@ -468,7 +470,7 @@ describe('trajectory planner', () => {
   });
 
   it('round-trips a saved path', () => {
-    const waypoints = [makeWaypoint([0, 20, 55, 129, 220, 0], 'a')];
+    const waypoints = [makeWaypoint([0, 20, 55, 129, 131, 0], 'a')];
     const saved = TrajectoryPlanner.exportPath('demo', waypoints, DEFAULT_PLANNER_CONFIG);
 
     expect(TrajectoryPlanner.validateSavedPath(saved)).toBe(true);
