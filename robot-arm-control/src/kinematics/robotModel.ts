@@ -162,8 +162,12 @@ export const JOINT_LIMITS_RAD = {
  * estimates and path preview match what the arm actually does. Change them in
  * both places together; a test asserts these exact values.
  */
-export const JOINT_MAX_SPEED_DEG_S: number[] = [60, 40, 60, 90, 120, 180];
-export const JOINT_MAX_ACCEL_DEG_S2: number[] = [150, 100, 150, 250, 300, 400];
+// Bring-up values, mirroring MAX_JOINT_SPEED / MAX_JOINT_ACCEL in
+// firmware/config.h. Reduced to roughly a quarter of the original estimates
+// after the arm stalled and vibrated on its first run. Raise both sides
+// together, by ear, once the arm moves cleanly.
+export const JOINT_MAX_SPEED_DEG_S: number[] = [15, 10, 15, 20, 30, 45];
+export const JOINT_MAX_ACCEL_DEG_S2: number[] = [40, 25, 40, 60, 75, 100];
 
 /**
  * Post-homing rest pose in degrees, from firmware/config.h POST_HOME_ANGLES.

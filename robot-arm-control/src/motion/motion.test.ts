@@ -63,8 +63,12 @@ describe('motion limits mirror the firmware', () => {
   it('matches MAX_JOINT_SPEED and MAX_JOINT_ACCEL from firmware/config.h', () => {
     // Planning against different numbers than the firmware enforces makes every
     // duration estimate and path preview a fiction.
-    expect(JOINT_MAX_SPEED_DEG_S).toEqual([60, 40, 60, 90, 120, 180]);
-    expect(JOINT_MAX_ACCEL_DEG_S2).toEqual([150, 100, 150, 250, 300, 400]);
+    // Bring-up values. Must match MAX_JOINT_SPEED / MAX_JOINT_ACCEL in
+    // firmware/config.h exactly - if the solver plans in a faster box than the
+    // firmware will execute, the firmware silently scales the move down and the
+    // arm arrives late relative to everything the app thinks it timed.
+    expect(JOINT_MAX_SPEED_DEG_S).toEqual([15, 10, 15, 20, 30, 45]);
+    expect(JOINT_MAX_ACCEL_DEG_S2).toEqual([40, 25, 40, 60, 75, 100]);
   });
 });
 
@@ -162,8 +166,14 @@ describe('joint-space interpolation', () => {
     const start = [...HOME_POSE_DEG];
     const end = [0, 45, 55, 129, 220, 0];
 
-    const fast = interp.interpolateJointSpace(start, end, 40, 120, 10);
-    const slow = interp.interpolateJointSpace(start, end, 10, 120, 10);
+    // Both speeds have to sit below the axis limit, or the planner clamps them
+    // to the same value and the comparison proves nothing. J2 is the only joint
+    // that moves here, so scale off its limit instead of hardcoding a figure -
+    // hardcoded speeds silently stopped testing anything when the bring-up
+    // values were lowered.
+    const j2Limit = JOINT_MAX_SPEED_DEG_S[1];
+    const fast = interp.interpolateJointSpace(start, end, j2Limit * 0.8, 120, 10);
+    const slow = interp.interpolateJointSpace(start, end, j2Limit * 0.2, 120, 10);
 
     expect(slow.duration).toBeGreaterThan(fast.duration * 2);
   });

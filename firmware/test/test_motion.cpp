@@ -488,8 +488,17 @@ static void testNoInstantStart() {
   printf("        J2 peak speed  %.1f deg/s (limit %.1f)\n", peak, MAX_JOINT_SPEED[1]);
   printf("        J2 peak accel  %.1f deg/s^2 (limit %.1f)\n", accel, MAX_JOINT_ACCEL[1]);
 
-  // Allow headroom for differentiating a quantised trace twice.
-  CHECK(accel <= MAX_JOINT_ACCEL[1] * 1.35);
+  // Differentiating an integer step trace twice quantises the result: one
+  // microstep of jitter inside a sampling window appears as
+  // (1 / USTEPS_PER_DEG) / dt^2 of acceleration. On J2 at 20 ms windows that
+  // grain is 11.25 deg/s^2, so a purely multiplicative tolerance passes at a
+  // high configured limit and fails at a low one for no physical reason -
+  // measured peaks come out as exact multiples of the grain. Allow for the
+  // measurement explicitly and keep the multiplicative headroom tight, so a
+  // planner that really overshot would still be caught.
+  const double sampleDt = 0.020;
+  const double accelGrain = (1.0 / USTEPS_PER_DEG[1]) / (sampleDt * sampleDt);
+  CHECK(accel <= MAX_JOINT_ACCEL[1] * 1.1 + 3.0 * accelGrain);
   pass("acceleration stays within the configured limit");
 
   // The first sampling window must be far below cruise. Without a ramp it would

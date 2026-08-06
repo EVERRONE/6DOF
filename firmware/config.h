@@ -94,26 +94,38 @@ const float USTEPS_PER_DEG[NUM_AXES] = {
 // Tune upward only while listening to the arm. If a joint knocks on starting or
 // stopping, its acceleration is too high for the load.
 
+// !! BRING-UP VALUES. These are deliberately far below what the hardware can
+// !! do -- roughly a quarter of the estimates they replace -- because the arm
+// !! stalled and vibrated on the first run, worst on J3. A stalling motor makes
+// !! every other measurement meaningless: it does not reach its endstop, it
+// !! loses steps, and the position report becomes fiction.
+// !!
+// !! At these speeds every axis stays inside the pull-in torque of its motor
+// !! even if the drivers turn out to be set to 1/8 microstepping, which would
+// !! double the real speed. That makes the direction and calibration checks in
+// !! docs/BRINGUP.md possible regardless of how the jumpers are set.
+// !!
+// !! Raise these afterwards, one axis at a time, listening. See BRINGUP step 6.
 const float MAX_JOINT_SPEED[NUM_AXES] = {
-  60.0f,   // J1  deg/s  ->  63 RPM at the motor
-  40.0f,   // J2         -> 167 RPM
-  60.0f,   // J3         ->  63 RPM
-  90.0f,   // J4         ->  56 RPM
-  120.0f,  // J5         ->  40 RPM
-  180.0f   // J6         ->  30 RPM
+  15.0f,   // J1  deg/s  ->  16 RPM at the motor
+  10.0f,   // J2         ->  42 RPM
+  15.0f,   // J3         ->  16 RPM
+  20.0f,   // J4         ->  13 RPM
+  30.0f,   // J5         ->  10 RPM
+  45.0f    // J6         ->   8 RPM
 };
 
 const float MAX_JOINT_ACCEL[NUM_AXES] = {
-  150.0f,  // J1  deg/s^2
-  100.0f,  // J2  carries the whole arm, so the gentlest ramp
-  150.0f,  // J3
-  250.0f,  // J4
-  300.0f,  // J5
-  400.0f   // J6
+  40.0f,   // J1  deg/s^2
+  25.0f,   // J2  carries the whole arm, so the gentlest ramp
+  40.0f,   // J3
+  60.0f,   // J4
+  75.0f,   // J5
+  100.0f   // J6
 };
 
 // Default speed used when the host does not specify one.
-const float DEFAULT_SPEED = 30.0f;  // deg/s
+const float DEFAULT_SPEED = 8.0f;  // deg/s
 
 // ---------------------------------------------------------------------------
 // Step generation
@@ -172,8 +184,10 @@ const bool HOME_TOWARD_MIN[NUM_AXES] = {false, false, true, false, false, false}
 const float HOME_POSITION[NUM_AXES] = {0, 0, 0, 0, 0, 0};
 const float POST_HOME_ANGLES[NUM_AXES] = {0, 5, 55, 129, 220, 0};
 
-const float HOMING_SPEED = 10.0f;       // deg/s, fast seek
-const float HOMING_FINE_SPEED = 2.0f;   // deg/s, second approach
+// Also reduced for bring-up: a seek in the wrong direction should crawl, not
+// run, so there is time to cut the power before it reaches the hard stop.
+const float HOMING_SPEED = 4.0f;        // deg/s, fast seek
+const float HOMING_FINE_SPEED = 1.0f;   // deg/s, second approach
 const float BACKOFF_DISTANCE = 2.0f;    // degrees to retract after triggering
 
 // Give up if the endstop has not triggered within this much travel, per joint.
