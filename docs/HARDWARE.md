@@ -33,14 +33,14 @@ position is meaningless — re-home.
 
 ## Motors and reduction
 
-| Joint | Motor | Rated current | Gear pairing | Reduction | µsteps/° |
-|-------|-------|---------------|--------------|-----------|----------|
-| J1 | Wantai 1.8° | 2.6 A | 16:100 | 6.25 : 1 | 55.556 |
-| J2 | 17HS13-0404S-PG5 | 0.4 A | 16:80 × 5:1 planetary | 25 : 1 | 222.222 |
-| J3 | 17HS16-2004S1 | 2.0 A | 16:100 | 6.25 : 1 | 55.556 |
-| J4 | 14HS08-0404S | 0.4 A | 16:60 | 3.75 : 1 | 33.333 |
-| J5 | 14HR05-0504S | 0.5 A | not recorded | 2 : 1 | 17.778 |
-| J6 | 8HS11-0204S | 0.2 A | direct | 1 : 1 | 8.889 |
+| Joint | Motor | Rated current | Documented pairing | Reduction | µsteps/° |
+|-------|-------|---------------|--------------------|-----------|----------|
+| J1 | Wantai 1.8° | 2.6 A | 16:100 | 6.250 : 1 | 55.556 |
+| J2 | 17HS13-0404S-PG5 | 0.4 A | 16:80 × 5:1 planetary | 25.000 : 1 | 222.222 |
+| J3 | 17HS16-2004S1 | 2.0 A | 16:100 → really 16:90 | **5.625 : 1** | **50.000** |
+| J4 | 14HS08-0404S | 0.4 A | 16:60 → wrong | **2.909 : 1** | **25.862** |
+| J5 | 14HR05-0504S | 0.5 A | never recorded | **3.390 : 1** | **30.132** |
+| J6 | 8HS11-0204S | 0.2 A | direct | 1.000 : 1 | 8.889 |
 
 The µsteps/° column is `USTEPS_PER_DEG` in `firmware/config.h`. Every value is
 consistent with its documented gear pairing at 1/16 microstepping on a 200
@@ -52,14 +52,19 @@ step/rev motor:
 reduction                   = USTEPS_PER_DEG / 8.889
 ```
 
-which gives 6.25, 25, 6.25, 3.75, 2.0 and 1.0 — matching the table. J5's gear
-pairing was never written down; its 2:1 is implied by the calibration value.
+The bold values are **measured**, folded in from an earlier calibration of this
+same arm. The rest were derived from the documented pairings, and three of them
+were wrong — exactly the failure the derivation was warned about: a 20T→120T pair
+reads 6.0 where a 20T→125T reads 6.25, and the two look nearly identical on the
+machine.
 
-> These numbers are **derived, not measured**. They are self-consistent, which
-> rules out a transcription error, but not a wrong assumption about a gear. A
-> 20T→120T pair reads 6.0 where a 20T→125T reads 6.25, and the two look nearly
-> identical. Measure each axis before trusting a long move: see the bring-up
-> sequence in [firmware/README.md](../firmware/README.md).
+J5 is the one that mattered. Its pairing was never written down, so 2:1 was a
+guess, and it is out by 70%.
+
+Cross-checked independently: applying the calibration scales to the angles the
+firmware reports at the parked pose reproduces the operational home pose stored
+by the earlier project to within 0.0° on J4, 1.0° on J5, 1.1° on J3 and 2.0° on
+J2 — two records that never shared a number agreeing on the same pose.
 
 ---
 
@@ -90,12 +95,22 @@ cannot be homed automatically.
 | J2 | 0° | +60° | 60° |
 | J3 | 0° | +70° | 70° |
 | J4 | 0° | +274° | 274° |
-| J5 | 0° | +280° | 280° |
+| J5 | 0° | **+165°** | 165° |
 | J6 | −360° | +360° | 720° |
 
 These are `JOINT_MIN` / `JOINT_MAX` in `firmware/config.h`, **mirrored** in the
 web app at `robot-arm-control/src/kinematics/robotModel.ts`. A test there asserts
 the exact values, so the two cannot drift apart silently. Change both together.
+
+The limits were recorded in the same scale as the old, wrong step scaling, so
+correcting the calibration moved where each number sits physically — the hard
+stop does not move, the number describing it does. The honest conversion is
+`limit × scale`, which narrows J5 from 280° to 165° and would widen J3 to 77.8°
+and J4 to 353°. J5 is narrowed; J3 and J4 keep their old, tighter figures,
+because it is not known whether those came from measurement or from the same
+notes as the wrong ratios, and a limit that is too tight only costs travel while
+one that is too generous drives into the stop. Open J3 and J4 up once their real
+travel has been measured.
 
 The reachable workspace that follows from these limits is small and strongly
 off-centre, because J1 travels only 70° and J2 only 60°:
@@ -115,10 +130,14 @@ box can still be out of reach.
 
 | Joint | Datum angle | Parks at |
 |-------|-------------|----------|
-| J2 | 0° | 5° |
-| J3 | 0° | 55° |
-| J4 | 0° | 129° |
-| J5 | 0° | 220° |
+| J2 | 0° | 15° |
+| J3 | 0° | 41.1° |
+| J4 | 0° | 165° |
+| J5 | 0° | 131° |
+
+The parked pose was measured: the arm was jogged into the wanted rest position
+and these are the angles reported there. It is also the anchor for the 3D view —
+URDF zero is this pose, so the model and the machine agree there by construction.
 
 `HOME_POSITION` and `POST_HOME_ANGLES` in `firmware/config.h`. Homing runs fast
 seek → back off → slow second approach → park, all acceleration limited, and each
