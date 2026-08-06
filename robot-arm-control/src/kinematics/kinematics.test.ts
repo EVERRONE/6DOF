@@ -15,7 +15,10 @@ import {
   NUM_JOINTS,
   ROBOT_JOINTS,
   degToRad,
-  isWithinLimitsDeg
+  isWithinLimitsDeg,
+  URDF_DIRECTION,
+  logicalToUrdfRad,
+  urdfToLogicalRad
 } from './robotModel';
 import { matrixToRpy, rotationLog, rpyToMatrix, solveSPD, transpose3, multiply3 } from './linalg';
 import { Vector3 } from './types';
@@ -52,6 +55,12 @@ function viewerChain(anglesDeg: number[]): { position: Vector3; quaternion: THRE
   const root = new THREE.Group();
   let parent: THREE.Object3D = root;
 
+  // Mirrors RobotModel3D.updatePose, including its conversion out of firmware
+  // angles into the URDF's convention. The point of this whole comparison is
+  // that the viewer and the solver build the same chain, so the conversion has
+  // to appear on both sides or the test stops checking anything real.
+  const anglesUrdf = logicalToUrdfRad(degToRad(anglesDeg));
+
   for (let i = 0; i < NUM_JOINTS; i++) {
     const origin = ROBOT_JOINTS[i].origin;
     const group = new THREE.Group();
@@ -64,7 +73,7 @@ function viewerChain(anglesDeg: number[]): { position: Vector3; quaternion: THRE
     );
     const jointQuat = new THREE.Quaternion().setFromAxisAngle(
       new THREE.Vector3(0, 0, 1),
-      (anglesDeg[i] * Math.PI) / 180
+      anglesUrdf[i]
     );
     group.setRotationFromQuaternion(
       new THREE.Quaternion().multiplyQuaternions(urdfQuat, jointQuat)
@@ -122,6 +131,69 @@ describe('robot model', () => {
 // ---------------------------------------------------------------------------
 // Forward kinematics
 // ---------------------------------------------------------------------------
+
+describe('firmware angles vs URDF angles', () => {
+  it('round-trips', () => {
+    const q = degToRad([12, 33, 41.25, 100, 140, -90]);
+    const back = urdfToLogicalRad(logicalToUrdfRad(q));
+    back.forEach((v, i) => expect(v).toBeCloseTo(q[i], 12));
+  });
+
+  it('puts the URDF at zero when the arm is parked', () => {
+    // The anchor the whole mapping rests on: after homing, the arm sits at
+    // HOME_POSE_DEG and the model is at its own zero. Break this and the 3D
+    // view drifts away from the machine again.
+    logicalToUrdfRad(degToRad(HOME_POSE_DEG)).forEach(v =>
+      expect(v).toBeCloseTo(0, 12)
+    );
+  });
+
+  it('draws the parked arm upright, not collapsed on the floor', () => {
+    // The symptom that started this: the viewer drew the arm flat while the real
+    // one stood up, because firmware angles were fed to the URDF chain raw.
+    // At the parked pose the upper arm is vertical and the forearm runs out
+    // horizontally, which is a claim about millimetres rather than convention.
+    const p = ForwardKinematics.position(HOME_POSE_DEG);
+    const origins = ForwardKinematics.jointOrigins(HOME_POSE_DEG);
+
+    expect(p.z).toBeGreaterThan(0.28); // TCP well above the base
+    expect(Math.hypot(p.x, p.y)).toBeGreaterThan(0.15); // and reaching outward
+
+    // J3 carries the elbow: it must be up, not down at base height.
+    expect(origins[2].z).toBeGreaterThan(0.25);
+
+    // The forearm, J4 to the TCP, stays level to within a millimetre.
+    expect(Math.abs(origins[3].z - p.z)).toBeLessThan(0.001);
+  });
+
+  it('records the per-joint signs, which no test here can verify', () => {
+    // Deliberately a change detector, and worth saying why.
+    //
+    // Every other test in this file compares FK against the viewer, and both
+    // read URDF_DIRECTION, so they agree with each other whatever it says -
+    // setting it to all +1 leaves this whole suite green. The offset is
+    // different: the parked pose pins it, and the two tests above catch it.
+    //
+    // The signs can only be checked against the machine: jog one joint and see
+    // whether the model turns the same way. Until each has been confirmed that
+    // way, this line is the record of an assumption inherited from an earlier
+    // calibration of this arm, not a verified fact. See docs/HARDWARE.md.
+    expect(URDF_DIRECTION).toEqual([1, -1, 1, -1, 1, -1]);
+  });
+
+  it('sends a joint the same way the arm does', () => {
+    // A positive firmware step must not move the model backwards. Checked
+    // through the chain rather than on the mapping, since that is where a
+    // wrong sign would actually bite.
+    const base = [...HOME_POSE_DEG];
+    const nudged = [...base];
+    nudged[1] += 5; // J2 up from the parked pose
+
+    const before = ForwardKinematics.position(base);
+    const after = ForwardKinematics.position(nudged);
+    expect(dist(before, after)).toBeGreaterThan(0.005);
+  });
+});
 
 describe('forward kinematics', () => {
   it('agrees with the 3D viewer chain across the whole joint range', () => {

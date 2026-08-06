@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import { JointNode, Robot3DModel } from './types';
 import { loadAllRobotMeshes, createMeshFromGeometry, getLinkColor } from './STLLoader';
-import { ROBOT_JOINTS } from '../kinematics/robotModel';
+import { ROBOT_JOINTS, logicalToUrdfRad } from '../kinematics/robotModel';
 
 /**
  * Build 3D robot model from STL meshes
@@ -178,13 +178,18 @@ export class RobotModel3DBuilder {
   updatePose(jointAngles: number[]): void {
     if (!this.model) return;
 
-    // Convert degrees to radians
+    // These arrive as firmware angles - what the arm reports and the panels
+    // show - and the chain below is the URDF's, so they need converting. Drawing
+    // them straight, as this used to, is what put the arm flat on the floor in
+    // the viewer while the real one stood upright. Same conversion as
+    // ForwardKinematics uses, so the viewer and the solver cannot disagree.
     const anglesRad = jointAngles.map(a => (a * Math.PI) / 180);
+    const anglesUrdf = logicalToUrdfRad(anglesRad);
 
     // For each joint, apply rotation
     for (let i = 0; i < 6; i++) {
       const joint = this.model.joints[i];
-      const angle = anglesRad[i];
+      const angle = anglesUrdf[i];
 
       // All joints rotate around Z-axis (from URDF axis="0 0 1")
       const origin = ROBOT_JOINTS[i].origin;

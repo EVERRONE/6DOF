@@ -177,6 +177,54 @@ export const JOINT_MAX_ACCEL_DEG_S2: number[] = [40, 25, 40, 60, 75, 100];
 // homing, measured on the machine rather than taken from the project notes.
 export const HOME_POSE_DEG: number[] = [0, 15.0, 41.1, 165.0, 131.0, 0];
 
+// ---------------------------------------------------------------------------
+// Firmware angles vs URDF angles
+// ---------------------------------------------------------------------------
+//
+// These are two different conventions for the same joint, and conflating them
+// was why the 3D view drew the arm collapsed on the floor while the real one
+// stood upright.
+//
+// The firmware counts every switched joint from its endstop, which sits at the
+// minimum end of travel and is a property of where a switch happens to be
+// bolted. The URDF counts from the model's own zero, which is a CAD choice.
+// Nothing makes those the same pose.
+//
+// The relation is a sign and an offset per joint:
+//
+//     urdf = URDF_DIRECTION * (logical - HOME_POSE_DEG)
+//
+// so URDF zero is the pose the arm parks in after homing. That anchor is not
+// arbitrary - at all-zero URDF angles this chain puts the upper arm vertical
+// and the forearm horizontal at 311 mm, which is the pose the arm is set to
+// rest in, and it is the same anchoring an earlier calibration of this machine
+// arrived at independently.
+//
+// The signs come from that earlier work, which recorded J5 and J6 as running
+// opposite to the URDF, combined with its joints counting negatively away from
+// their endstops where these count positively - which flips J2 and J4 as well.
+export const URDF_DIRECTION: number[] = [1, -1, 1, -1, 1, -1];
+
+const HOME_POSE_RAD_INTERNAL = HOME_POSE_DEG.map(d => (d * Math.PI) / 180);
+
+/** Firmware joint angles (radians) to the URDF chain's angles. */
+export function logicalToUrdfRad(qLogical: number[]): number[] {
+  return qLogical.map(
+    (v, i) => URDF_DIRECTION[i] * (v - HOME_POSE_RAD_INTERNAL[i])
+  );
+}
+
+/**
+ * URDF chain angles (radians) back to firmware angles.
+ *
+ * URDF_DIRECTION is +/-1, so dividing by it is multiplying by it.
+ */
+export function urdfToLogicalRad(qUrdf: number[]): number[] {
+  return qUrdf.map(
+    (v, i) => URDF_DIRECTION[i] * v + HOME_POSE_RAD_INTERNAL[i]
+  );
+}
+
 /** Centre of the joint range, a useful fallback seed. */
 export const MID_POSE_DEG: number[] = ROBOT_JOINTS.map(
   j => (j.limitDeg.min + j.limitDeg.max) / 2

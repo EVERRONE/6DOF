@@ -230,30 +230,47 @@ without affecting motion. Reduce and watch for lost steps.
 For reference, a stepper at rated current normally reaches 60–80 °C, which feels
 alarming but is not a fault.
 
-### The URDF zero pose is not known to match the firmware zero
+### URDF angles vs firmware angles — anchor RESOLVED, signs NOT
 
-`robotModel.ts` applies firmware joint angles straight to the URDF chain:
+The two count from different places, which is why the 3D view drew the arm
+collapsed on the floor while the real one stood upright. `robotModel.ts` now
+maps between them:
 
 ```
-T = Translate(origin.xyz) * R_rpy(origin.rpy) * Rz(q)
+urdf = URDF_DIRECTION * (logical - HOME_POSE_DEG)
+URDF_DIRECTION = [+1, -1, +1, -1, +1, -1]
 ```
 
-with no per-joint offset. That assumes the firmware's 0° and the URDF's 0° are
-the same physical pose. Nothing has verified this, and there is reason to doubt
-it: the firmware's datum is now the endstop, which sits at the **minimum** end of
-travel on every switched axis, while an earlier line of work on this project
-carried a `URDF_OFFSET_DEG` of `{0, 60, 0, 274, 280, 0}` — exactly `JOINT_MAX`
-for J2, J4 and J5, which is what you would need if the URDF counted those joints
-from the opposite end.
+**The anchor is settled.** URDF zero is the pose the arm parks in after homing.
+At all-zero URDF angles this chain puts J3 at 296 mm with the upper arm vertical
+and the forearm level at 311 mm, reaching out 202 mm — which is the pose the arm
+is set to rest in. An earlier calibration of this machine arrived at the same
+anchoring independently. Two tests hold it.
 
-If the two conventions differ, the 3D view is wrong by that offset even when the
-kinematics are internally consistent, and Cartesian moves will be wrong in the
-same way.
+**The per-joint signs are not settled.** They were inherited from that earlier
+work, which recorded J5 and J6 as running opposite to the URDF, combined with
+its joints counting negatively away from their endstops where these count
+positively — which flips J2 and J4 as well. That reasoning is sound but it is
+reasoning, not measurement.
 
-**To settle it:** home the arm, put it in a pose that is easy to measure, and
-compare the real joint angles against what the viewer draws. Any constant
-per-joint difference is the offset, and it belongs in one place shared by the
-viewer and the solver.
+No test in the suite can catch a wrong sign. FK and the viewer both read
+`URDF_DIRECTION`, so they agree with each other whatever it says: setting it to
+all `+1` leaves all 115 tests green. Only the machine can settle it.
+
+**To settle it,** with the arm homed and the 3D view open, jog each joint on its
+own by 20 degrees or so and watch both:
+
+- [ ] J1 — model turns the same way as the arm
+- [ ] J2 — same
+- [ ] J3 — same
+- [ ] J4 — same
+- [ ] J5 — same
+- [ ] J6 — same
+
+Any joint where the model goes the opposite way has the wrong sign: flip that
+entry in `URDF_DIRECTION` and in the test that records it. Do this before
+trusting Cartesian moves, because a wrong sign there sends the solver's
+correction the wrong way on that joint.
 
 ---
 

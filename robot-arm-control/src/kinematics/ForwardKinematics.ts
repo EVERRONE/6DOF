@@ -20,7 +20,14 @@ import {
   cross,
   transformPoint
 } from './linalg';
-import { NUM_JOINTS, ROBOT_JOINTS, TOOL_OFFSET, degToRad } from './robotModel';
+import {
+  NUM_JOINTS,
+  ROBOT_JOINTS,
+  TOOL_OFFSET,
+  URDF_DIRECTION,
+  degToRad,
+  logicalToUrdfRad
+} from './robotModel';
 
 /**
  * Everything FK produces internally, in radians and metres.
@@ -47,13 +54,18 @@ export class ForwardKinematics {
       throw new Error(`Expected ${NUM_JOINTS} joint angles, got ${q.length}`);
     }
 
+    // `q` is in firmware angles - the same numbers the arm reports and the UI
+    // shows - so it has to be mapped into the URDF's own convention before it
+    // can drive the chain. See URDF_DIRECTION in robotModel.
+    const qUrdf = logicalToUrdfRad(q);
+
     const frames: Matrix4x4[] = [];
     let T = identity4();
 
     for (let i = 0; i < NUM_JOINTS; i++) {
       const joint = ROBOT_JOINTS[i];
       T = multiply4(T, fromXyzRpy(joint.origin.xyz, joint.origin.rpy));
-      T = multiply4(T, rotZ4(q[i]));
+      T = multiply4(T, rotZ4(qUrdf[i]));
       frames.push(T);
     }
 
@@ -153,12 +165,18 @@ export class ForwardKinematics {
       const lever = sub(pTcp, origin);
       const linear = cross(axis, lever);
 
-      J[0][i] = linear.x;
-      J[1][i] = linear.y;
-      J[2][i] = linear.z;
-      J[3][i] = axis.x;
-      J[4][i] = axis.y;
-      J[5][i] = axis.z;
+      // The column above is the derivative with respect to the URDF angle, but
+      // the solver differentiates with respect to the firmware angle, and the
+      // two run opposite on half the joints. Without this the solver would step
+      // those joints the wrong way and fight itself.
+      const d = URDF_DIRECTION[i];
+
+      J[0][i] = linear.x * d;
+      J[1][i] = linear.y * d;
+      J[2][i] = linear.z * d;
+      J[3][i] = axis.x * d;
+      J[4][i] = axis.y * d;
+      J[5][i] = axis.z * d;
     }
 
     return J;
