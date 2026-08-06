@@ -185,22 +185,75 @@ The old notes, which described a single common enable on pin 8, were wrong.
 This also rules out permanent energisation as a cause of the heat seen on J4 and
 J5: those drivers do switch off when asked.
 
-### How to settle all three
+All three above were settled on the arm. Steps 2 and 5 of
+[BRINGUP.md](BRINGUP.md) describe the procedure used.
 
-Work one joint at a time, with the arm free to move:
+---
 
-1. `E 1`, then a small move: `J 0 5 0 0 0 0 5`. Note which way J2 turns. Repeat
-   per joint. Fix `INVERT_DIR` so that a positive command moves the joint in the
-   positive direction of the limits table above.
-2. With direction confirmed, `H 2` and watch. If it moves away from the switch,
-   flip `HOME_TOWARD_MIN` for that joint. Only run `H ALL` once every joint has
-   been homed individually.
-3. `E 0` and check by hand whether all six motors actually lose holding torque.
-   If J4–J6 stay energised, pin 9 is not wired and the notes are right.
+## Still open
 
-Steps 2 and 5 of [BRINGUP.md](BRINGUP.md) walk through this in the right order.
-Update this file and `firmware/config.h` together with what you find, and delete
-the conflicting column.
+### J4 and J5 run hot
+
+Both motors get very hot in normal use. Ruled out so far:
+
+- **Not permanent energisation.** `E 0` releases both, so the split enable works.
+- Vref was reported as set correctly, but the actual voltages have not been
+  measured, so "correctly" is unverified.
+
+The motors on this arm span 0.2 A to 2.6 A, and the two that run hot are the two
+smallest of the loaded axes:
+
+| Axis | Motor | Rated |
+|------|-------|-------|
+| J4 | 14HS08-0404S | 0.4 A |
+| J5 | 14HR05-0504S | 0.5 A |
+
+A single Vref applied across all six drivers would over-drive these by several
+times. Both are also small NEMA14 frames with little mass to shed heat, so they
+reach a given temperature faster than the NEMA17s on J1 and J3 at equal load.
+
+**To settle it, measure:**
+
+1. Vref at the test point on the J4 and J5 drivers, in volts, and compare against
+   the rated currents above using the formula for these specific driver modules
+   (it depends on the sense resistor, 0.11 Ω or 0.15 Ω).
+2. Whether they heat up while *enabled and stationary*: `E 1`, move nothing, wait
+   two minutes, feel. Hot at standstill points at holding current — either Vref,
+   or standstill current reduction being disabled. The TMC2209 configures that
+   from `PDN_UART` in standalone mode, and on a CNC Shield that pin's state
+   varies by driver module.
+
+Both axes are wrist joints with the lightest loads on the arm (3.75:1 and 2:1)
+and now run at 20 and 30 deg/s, so there is likely room to reduce their current
+without affecting motion. Reduce and watch for lost steps.
+
+For reference, a stepper at rated current normally reaches 60–80 °C, which feels
+alarming but is not a fault.
+
+### The URDF zero pose is not known to match the firmware zero
+
+`robotModel.ts` applies firmware joint angles straight to the URDF chain:
+
+```
+T = Translate(origin.xyz) * R_rpy(origin.rpy) * Rz(q)
+```
+
+with no per-joint offset. That assumes the firmware's 0° and the URDF's 0° are
+the same physical pose. Nothing has verified this, and there is reason to doubt
+it: the firmware's datum is now the endstop, which sits at the **minimum** end of
+travel on every switched axis, while an earlier line of work on this project
+carried a `URDF_OFFSET_DEG` of `{0, 60, 0, 274, 280, 0}` — exactly `JOINT_MAX`
+for J2, J4 and J5, which is what you would need if the URDF counted those joints
+from the opposite end.
+
+If the two conventions differ, the 3D view is wrong by that offset even when the
+kinematics are internally consistent, and Cartesian moves will be wrong in the
+same way.
+
+**To settle it:** home the arm, put it in a pose that is easy to measure, and
+compare the real joint angles against what the viewer draws. Any constant
+per-joint difference is the offset, and it belongs in one place shared by the
+viewer and the solver.
 
 ---
 
