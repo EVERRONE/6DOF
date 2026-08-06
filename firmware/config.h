@@ -197,6 +197,22 @@ const float POST_HOME_ANGLES[NUM_AXES] = {0, 5, 55, 129, 220, 0};
 // run, so there is time to cut the power before it reaches the hard stop.
 const float HOMING_SPEED = 4.0f;        // deg/s, fast seek
 const float HOMING_FINE_SPEED = 1.0f;   // deg/s, second approach
+
+// Per-axis multiplier on both homing speeds. The axes do not want the same
+// seek rate: J4 and J5 cover 274 and 280 degrees of travel against J2's 60, so
+// one speed that suits J2 makes them crawl for minutes. Set from how each axis
+// behaved on the arm.
+//
+// Still scaled by MAX_JOINT_SPEED, so a factor cannot drive an axis past what
+// it can actually hold.
+const float HOMING_SPEED_FACTOR[NUM_AXES] = {
+  1.0f,  // J1  no endstop
+  1.0f,  // J2
+  2.0f,  // J3
+  3.0f,  // J4
+  3.0f,  // J5
+  1.0f   // J6  no endstop
+};
 const float BACKOFF_DISTANCE = 2.0f;    // degrees to retract after triggering
 
 // The retreat is repeated in BACKOFF_DISTANCE steps until the switch re-opens,

@@ -151,6 +151,23 @@ int HomingController::seekDirection(int axis) const {
   return HOME_TOWARD_MIN[axis] ? -1 : 1;
 }
 
+// Homing speeds are per axis. J4 and J5 cover 274 and 280 degrees to reach their
+// switches against J2's 60, so a single rate that suits J2 leaves them crawling.
+// The planner still clamps to MAX_JOINT_SPEED, so a factor cannot ask an axis
+// for more than it can hold.
+float HomingController::seekSpeed(int axis) const {
+  if (axis < 0 || axis >= NUM_AXES) return HOMING_SPEED;
+  return HOMING_SPEED * HOMING_SPEED_FACTOR[axis];
+}
+
+// The fine approach is what sets the repeatability of the datum, so it scales
+// with the axis too: a joint seeking three times faster would otherwise spend
+// three times as long crawling back onto its switch.
+float HomingController::fineSpeed(int axis) const {
+  if (axis < 0 || axis >= NUM_AXES) return HOMING_FINE_SPEED;
+  return HOMING_FINE_SPEED * HOMING_SPEED_FACTOR[axis];
+}
+
 void HomingController::finishAxis() {
   sequenceIndex_++;
   if (sequenceIndex_ >= sequenceLength_) {
@@ -199,7 +216,7 @@ void HomingController::update() {
       // joint limits, because before homing the recorded position is arbitrary;
       // the switch is the limit here.
       if (stepper_.queueAxisMove(axis, seekDirection(axis) * HOMING_MAX_TRAVEL[axis],
-                                 HOMING_SPEED)) {
+                                 seekSpeed(axis))) {
         enterPhase(PHASE_SEEK);
       }
       return;
@@ -226,7 +243,7 @@ void HomingController::update() {
 
     case PHASE_BACKOFF: {
       if (stepper_.queueAxisMove(axis, -seekDirection(axis) * BACKOFF_DISTANCE,
-                                 HOMING_SPEED)) {
+                                 seekSpeed(axis))) {
         backoffAttempts_++;
         enterPhase(PHASE_BACKOFF_SETTLE);
       }
@@ -263,7 +280,7 @@ void HomingController::update() {
       // when the switch needed several attempts to clear.
       const float retracted = backoffAttempts_ * BACKOFF_DISTANCE;
       if (stepper_.queueAxisMove(axis, seekDirection(axis) * retracted * 2.0f,
-                                 HOMING_FINE_SPEED)) {
+                                 fineSpeed(axis))) {
         enterPhase(PHASE_FINE_SETTLE);
       }
       return;
@@ -308,7 +325,7 @@ void HomingController::update() {
         finishAxis();
         return;
       }
-      if (stepper_.queueAxisMove(axis, delta, HOMING_SPEED)) {
+      if (stepper_.queueAxisMove(axis, delta, seekSpeed(axis))) {
         enterPhase(PHASE_PARK_SETTLE);
       }
       return;

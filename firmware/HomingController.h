@@ -112,6 +112,8 @@ private:
   void finishAxis();
   bool phaseTimedOut() const;
   int seekDirection(int axis) const;
+  float seekSpeed(int axis) const;
+  float fineSpeed(int axis) const;
 
   /** Longest any single homing phase may take before it is called a failure. */
   static const uint32_t PHASE_TIMEOUT_MS = 90000;
