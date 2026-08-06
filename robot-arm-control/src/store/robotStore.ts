@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { JointAngles, EndstopState, ConnectionStatus, RobotState } from '../types/robot';
 import { SerialManager } from '../communication/SerialManager';
 import { FirmwareState, FirmwareStatus } from '../communication/types';
-import { Vector3, IKResult } from '../kinematics/types';
+import { Vector3, Rotation3, IKResult } from '../kinematics/types';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
 import {
@@ -61,6 +61,23 @@ interface RobotStore {
 
   // Kinematics state
   currentPosition: Vector3 | null;
+  /** Current tool orientation, as rpy. Needed to hold it while moving. */
+  currentRotation: Rotation3 | null;
+  /**
+   * Whether Cartesian moves must keep the tool pointing the way it is.
+   *
+   * Off, a Cartesian move solves for position only: three equations, six
+   * unknowns, so the orientation is free and the tool tips as the arm reaches -
+   * 8 degrees for a 20 mm move in Z from the parked pose, 21 degrees for 50 mm.
+   * Fine for getting somewhere, useless for carrying a pen or a gripper.
+   */
+  toolLocked: boolean;
+  /**
+   * The orientation to hold, captured when the lock is switched on rather than
+   * read at each move. Re-reading it every move would let small residuals
+   * accumulate, and the tool would ratchet away from where it started.
+   */
+  lockedRotation: Rotation3 | null;
   targetPosition: Vector3 | null;
   ikStatus: IKResult | null;
 
@@ -104,6 +121,7 @@ interface RobotStore {
   setTargetPosition: (position: Vector3) => void;
   moveToPosition: (position: Vector3) => Promise<void>;
   updateCurrentPosition: () => void;
+  setToolLocked: (locked: boolean) => void;
 
   // Waypoint actions
   addWaypoint: (waypoint: Waypoint) => void;
@@ -207,6 +225,9 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   firmwareStatus: null,
   firmwareStatusAt: 0,
   currentPosition: null,
+  currentRotation: null,
+  toolLocked: false,
+  lockedRotation: null,
   targetPosition: null,
   ikStatus: null,
   manualSpeed: 30,
@@ -496,8 +517,27 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const fkResult = ForwardKinematics.solve(anglesArray);
 
     if (fkResult.success) {
-      set({ currentPosition: fkResult.endEffectorPose.position });
+      set({
+        currentPosition: fkResult.endEffectorPose.position,
+        currentRotation: fkResult.endEffectorPose.rotation
+      });
     }
+  },
+
+  setToolLocked: (locked) => {
+    if (!locked) {
+      set({ toolLocked: false, lockedRotation: null });
+      return;
+    }
+    // Capture where the tool points now, and hold that.
+    get().updateCurrentPosition();
+    const rotation = get().currentRotation;
+    if (!rotation) {
+      get().logEvent('error', 'Cannot lock the tool: no position reported yet');
+      return;
+    }
+    set({ toolLocked: true, lockedRotation: { ...rotation } });
+    get().logEvent('info', 'Tool orientation locked');
   },
 
   // Set target Cartesian position
@@ -507,8 +547,32 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
   // Move to Cartesian position using inverse kinematics
   moveToPosition: async (position) => {
-    const { serialManager, currentAngles, manualSpeed } = get();
+    const {
+      serialManager,
+      currentAngles,
+      manualSpeed,
+      firmwareStatus,
+      toolLocked,
+      lockedRotation
+    } = get();
     if (!serialManager) return;
+
+    // Same reasoning as running a path: a Cartesian target is turned into
+    // absolute joint angles, so it only means anything if the arm and the
+    // firmware agree on where the arm is.
+    if (firmwareStatus && !firmwareStatus.positionTrusted) {
+      get().logEvent(
+        'error',
+        'Refusing the Cartesian move: the arm has not been homed since power-up, ' +
+          'or lost its datum to a stop.'
+      );
+      return;
+    }
+
+    if (firmwareStatus && !firmwareStatus.enabled) {
+      get().logEvent('error', 'Refusing the Cartesian move: the motors are off (E 1)');
+      return;
+    }
 
     // Use current joint angles as initial guess for IK
     const initialGuess = [
@@ -520,8 +584,14 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       currentAngles.J6
     ];
 
-    // Solve inverse kinematics
-    const ikResult = ikSolver.solvePosition(position, initialGuess);
+    // Locked, the solver has to satisfy orientation as well as position: six
+    // constraints against six joints, which is exactly determined and costs
+    // reach - from the parked pose, roughly 40 mm in +X against 85 mm free.
+    // Unlocked, orientation is left to fall where it may.
+    const ikResult =
+      toolLocked && lockedRotation
+        ? ikSolver.solvePose({ position, rotation: lockedRotation }, initialGuess)
+        : ikSolver.solvePosition(position, initialGuess);
 
     // Store IK status for UI feedback
     set({ ikStatus: ikResult });

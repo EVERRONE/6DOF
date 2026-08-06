@@ -160,7 +160,9 @@ export class InverseKinematics {
           jointAngles: radToDeg(attempt.q),
           success: true,
           iterations: totalIterations,
-          residualError: attempt.positionError
+          residualError: attempt.positionError,
+          orientationError:
+            target.rotation !== null ? attempt.orientationError : undefined
         };
       }
 
@@ -181,7 +183,9 @@ export class InverseKinematics {
       success: false,
       error: `Target not reachable within tolerance (best residual: ${detail})`,
       iterations: totalIterations,
-      residualError: fallback.positionError
+      residualError: fallback.positionError,
+      orientationError:
+        target.rotation !== null ? fallback.orientationError : undefined
     };
   }
 

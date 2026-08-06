@@ -14,6 +14,7 @@ import { SerialManager } from '../communication/SerialManager';
 import { ConnectionStatus, RobotState } from '../types/robot';
 import { ExecutionState, Waypoint } from '../motion/types';
 import { TrajectoryPlanner } from '../motion/TrajectoryPlanner';
+import { rotationLog, multiply3, transpose3 } from '../kinematics/linalg';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { HOME_POSE_DEG } from '../kinematics/robotModel';
 import { FakePort, FakeSerial, commandsOfType } from '../testUtils/fakeSerial';
@@ -107,6 +108,15 @@ beforeEach(() => {
     trajectoryPositions: [],
     executionState: ExecutionState.IDLE,
     ikStatus: null,
+    events: [],
+    // Cartesian state. Leaving these out let a tool lock set by one test carry
+    // into the next, which is the kind of failure that reads as a bug in the
+    // code under test rather than in the fixture.
+    currentPosition: null,
+    currentRotation: null,
+    targetPosition: null,
+    toolLocked: false,
+    lockedRotation: null,
     currentAngles: {
       J1: HOME_POSE_DEG[0], J2: HOME_POSE_DEG[1], J3: HOME_POSE_DEG[2],
       J4: HOME_POSE_DEG[3], J5: HOME_POSE_DEG[4], J6: HOME_POSE_DEG[5]
@@ -611,5 +621,71 @@ describe('store: a path needs a datum', () => {
 
     expect(commandsOfType(port, 'J ')).toHaveLength(pointCount);
     expect(useRobotStore.getState().executionState).toBe(ExecutionState.COMPLETED);
+  });
+});
+
+describe('store: tool orientation lock', () => {
+  async function homedStore() {
+    const { port } = await connectStore();
+    port.push(STATUS_IDLE);
+    port.push(`POS ${HOME_POSE_DEG.map(v => v.toFixed(2)).join(' ')}\n`);
+    await flush();
+    return port;
+  }
+
+  /** Joint angles from the last J line the store sent. */
+  function lastCommandedAngles(port: ReturnType<typeof connectStore> extends Promise<infer H> ? any : any): number[] {
+    const moves = commandsOfType(port, 'J ');
+    const parts = moves[moves.length - 1].trim().split(/\s+/);
+    return parts.slice(1, 7).map(Number);
+  }
+
+  function tumbleDeg(from: number[], to: number[]): number {
+    const Ra = ForwardKinematics.solveRad(from.map(d => (d * Math.PI) / 180)).rotation;
+    const Rb = ForwardKinematics.solveRad(to.map(d => (d * Math.PI) / 180)).rotation;
+    const w = rotationLog(multiply3(Rb, transpose3(Ra)));
+    return (Math.hypot(w.x, w.y, w.z) * 180) / Math.PI;
+  }
+
+  it('holds the tool through a Cartesian move when locked', async () => {
+    const port = await homedStore();
+
+    useRobotStore.getState().setToolLocked(true);
+    expect(useRobotStore.getState().lockedRotation).not.toBeNull();
+
+    const p = ForwardKinematics.position(HOME_POSE_DEG);
+    await useRobotStore.getState().moveToPosition({ ...p, z: p.z + 0.02 });
+
+    const commanded = lastCommandedAngles(port);
+    expect(tumbleDeg(HOME_POSE_DEG, commanded)).toBeLessThan(0.5);
+  });
+
+  it('lets it tip when the lock is off', async () => {
+    const port = await homedStore();
+    expect(useRobotStore.getState().toolLocked).toBe(false);
+
+    const p = ForwardKinematics.position(HOME_POSE_DEG);
+    await useRobotStore.getState().moveToPosition({ ...p, z: p.z + 0.02 });
+
+    const commanded = lastCommandedAngles(port);
+    expect(tumbleDeg(HOME_POSE_DEG, commanded)).toBeGreaterThan(3);
+  });
+
+  it('refuses a Cartesian move without a datum', async () => {
+    const { port } = await connectStore();
+    port.push('STATUS IDLE 23 0 0 0 1\n');
+    await flush();
+
+    const p = ForwardKinematics.position(HOME_POSE_DEG);
+    await useRobotStore.getState().moveToPosition({ ...p, z: p.z + 0.02 });
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(0);
+  });
+
+  it('drops the held orientation when unlocked', async () => {
+    await homedStore();
+    useRobotStore.getState().setToolLocked(true);
+    useRobotStore.getState().setToolLocked(false);
+    expect(useRobotStore.getState().lockedRotation).toBeNull();
   });
 });

@@ -606,3 +606,85 @@ describe('workspace bounds', () => {
     });
   });
 });
+
+describe('holding the tool orientation', () => {
+  // Solving for position alone leaves three of six degrees of freedom
+  // unconstrained, so the wrist tips as the arm reaches. That is fine for
+  // getting somewhere and useless for carrying a pen or a gripper.
+
+  const ik = new InverseKinematics();
+
+  function tumbleDeg(from: number[], to: number[]): number {
+    const Ra = ForwardKinematics.solveRad(degToRad(from)).rotation;
+    const Rb = ForwardKinematics.solveRad(degToRad(to)).rotation;
+    const w = rotationLog(multiply3(Rb, transpose3(Ra)));
+    return (Math.hypot(w.x, w.y, w.z) * 180) / Math.PI;
+  }
+
+  it('lets the tool tip when only the position is constrained', () => {
+    const home = ForwardKinematics.solve(HOME_POSE_DEG);
+    const p = home.endEffectorPose.position;
+
+    const r = ik.solvePosition({ ...p, z: p.z + 0.02 }, [...HOME_POSE_DEG]);
+    expect(r.success).toBe(true);
+
+    // Not an accident to be fixed by tightening a tolerance: the constraint is
+    // simply absent, and the tool ends up several degrees off.
+    expect(tumbleDeg(HOME_POSE_DEG, r.jointAngles)).toBeGreaterThan(3);
+    expect(r.orientationError).toBeUndefined();
+  });
+
+  it('holds the tool when the orientation is constrained too', () => {
+    const home = ForwardKinematics.solve(HOME_POSE_DEG);
+    const p = home.endEffectorPose.position;
+    const rot = home.endEffectorPose.rotation;
+
+    const r = ik.solvePose(
+      { position: { ...p, z: p.z + 0.02 }, rotation: rot },
+      [...HOME_POSE_DEG]
+    );
+
+    expect(r.success).toBe(true);
+    expect(r.residualError!).toBeLessThan(0.0005);
+    expect(tumbleDeg(HOME_POSE_DEG, r.jointAngles)).toBeLessThan(0.5);
+    expect(r.orientationError).toBeDefined();
+    expect(r.orientationError!).toBeLessThan(0.0087);
+  });
+
+  it('holds it across a run of moves without ratcheting away', () => {
+    // The reason the lock captures one orientation instead of re-reading the
+    // current one each move: re-reading lets each solve's residual become the
+    // next one's reference, and the tool walks away over a sequence.
+    const home = ForwardKinematics.solve(HOME_POSE_DEG);
+    const rot = home.endEffectorPose.rotation;
+    let q = [...HOME_POSE_DEG];
+
+    for (let step = 1; step <= 6; step++) {
+      const p = ForwardKinematics.position(HOME_POSE_DEG);
+      const target = { x: p.x, y: p.y + step * 0.01, z: p.z };
+      const r = ik.solvePose({ position: target, rotation: rot }, q);
+      expect(r.success).toBe(true);
+      q = r.jointAngles;
+    }
+
+    expect(tumbleDeg(HOME_POSE_DEG, q)).toBeLessThan(0.5);
+  });
+
+  it('reports which constraint it could not meet', () => {
+    // Locked, reach shrinks - measured from the parked pose, +X gives about
+    // 40 mm against 85 mm free. A target beyond that has to fail loudly, with
+    // both residuals, rather than quietly returning a tipped-over pose.
+    const home = ForwardKinematics.solve(HOME_POSE_DEG);
+    const p = home.endEffectorPose.position;
+    const rot = home.endEffectorPose.rotation;
+
+    const r = ik.solvePose(
+      { position: { ...p, x: p.x + 0.25 }, rotation: rot },
+      [...HOME_POSE_DEG]
+    );
+
+    expect(r.success).toBe(false);
+    expect(r.orientationError).toBeDefined();
+    expect(r.error).toMatch(/orientation/);
+  });
+});

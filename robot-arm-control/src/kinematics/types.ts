@@ -69,6 +69,12 @@ export interface IKResult {
   iterations?: number;
   /** Remaining position error in metres */
   residualError?: number;
+  /**
+   * Remaining orientation error in radians, when an orientation was asked for.
+   * Undefined for a position-only solve, where orientation is not a constraint
+   * and any value would be meaningless rather than zero.
+   */
+  orientationError?: number;
 }
 
 /**

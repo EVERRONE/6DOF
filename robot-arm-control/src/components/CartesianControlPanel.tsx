@@ -16,7 +16,10 @@ export const CartesianControlPanel: React.FC = () => {
     moveToPosition,
     motorsEnabled,
     connectionStatus,
-    ikStatus
+    ikStatus,
+    toolLocked,
+    setToolLocked,
+    firmwareStatus
   } = useRobotStore();
 
   // Local state for input fields
@@ -94,9 +97,40 @@ export const CartesianControlPanel: React.FC = () => {
 
   const isConnected = connectionStatus === 'connected';
 
+  // Same gate as running a path: a Cartesian target becomes absolute joint
+  // angles, so an untrusted datum makes it mean something else entirely.
+  const blockedReason = !isConnected
+    ? 'Not connected'
+    : firmwareStatus && !firmwareStatus.positionTrusted
+      ? 'Home the arm first — its position is not trusted'
+      : firmwareStatus && !firmwareStatus.enabled
+        ? 'Motors are off'
+        : null;
+
   return (
     <div className="p-4 bg-white border-b">
       <h2 className="text-xl font-bold mb-4">Cartesian Control</h2>
+
+      {/* Orientation lock. Without it a Cartesian move solves position only -
+          three equations against six joints - so the tool tips as the arm
+          reaches: 8 degrees for 20 mm in Z from the parked pose. */}
+      <label className="flex items-start gap-2 mb-4 p-3 bg-blue-50 rounded cursor-pointer">
+        <input
+          type="checkbox"
+          checked={toolLocked}
+          onChange={e => setToolLocked(e.target.checked)}
+          disabled={!isConnected}
+          className="mt-0.5"
+        />
+        <span className="text-sm">
+          <span className="font-semibold text-gray-800">Keep the tool pointing this way</span>
+          <span className="block text-xs text-gray-600 mt-0.5">
+            {toolLocked
+              ? 'Holding the orientation captured when you ticked this. Costs reach: from the parked pose roughly 40 mm in +X against 85 mm free.'
+              : 'Off, only the position is solved for and the tool tips as the arm reaches — 8° for a 20 mm move in Z.'}
+          </span>
+        </span>
+      </label>
 
       {/* Current Position Display */}
       <div className="mb-4 p-3 bg-gray-50 rounded">
@@ -187,7 +221,10 @@ export const CartesianControlPanel: React.FC = () => {
         }`}>
           {ikStatus.success ? (
             <div>
-              ✓ IK Solution found ({ikStatus.iterations} iterations, error: {(ikStatus.residualError! * 1000).toFixed(2)}mm)
+              ✓ IK solved in {ikStatus.iterations} iterations — {(ikStatus.residualError! * 1000).toFixed(2)} mm
+              {toolLocked && ikStatus.orientationError !== undefined
+                ? `, ${((ikStatus.orientationError * 180) / Math.PI).toFixed(2)}° orientation`
+                : ''}
             </div>
           ) : (
             <div>✗ {ikStatus.error}</div>
