@@ -23,8 +23,15 @@ This firmware controls a 6-axis robot arm using a Teensy 4.1 microcontroller wit
 | J6    | 26       | 27      |
 
 ### Other Connections
-- Enable Pin: 8 (Active LOW - connect to all driver EN pins)
+- Enable Pin 1: 8 (Active LOW - EN net of driver board 1, drives J1/J2/J3)
+- Enable Pin 2: 9 (Active LOW - EN net of driver board 2, drives J4/J5/J6)
 - Endstops: J2(30), J3(31), J4(32), J5(33)
+
+The drivers are split across two boards, and each board has its own shared EN
+net. This grouping matters when diagnosing faults: J1/J2/J3 share every supply
+and logic net on board 1, and J4/J5/J6 share them on board 2. A fault that
+takes out exactly one of those groups is a board-level fault, not a per-motor
+fault. See "All joints on one board lose torque together" under Troubleshooting.
 
 ## Uploading Firmware
 
@@ -210,6 +217,37 @@ The homing sequence is:
 - Check enable pin is LOW (8 â†’ GND through Teensy)
 - Verify driver Vref is set correctly (~0.6-1.0V depending on motor)
 - Check 24V power supply
+
+**Problem:** All joints on one board lose torque together (J1/J2/J3, or J4/J5/J6)
+
+Three motors do not fail at the same instant by coincidence. That group is
+exactly one driver board, so the fault is in something all three share on that
+board, not in a motor, a coil wire, or a single driver. If flexing or moving
+the board provokes it, it is an intermittent mechanical connection. Candidates,
+all shared per board:
+
+- EN net (pin 8 for board 1, pin 9 for board 2). On TMC2209 the ENN input is
+  pulled high internally, so an open EN wire floats to "disabled" and kills all
+  drivers on that board instantly. This is the opposite of A4988/DRV8825, which
+  default to enabled when EN floats. Prime suspect on this hardware.
+- 24V motor supply (VMOT) at that board's screw terminal or its trace.
+- Common GND between the Teensy and that board.
+- Logic supply (VCC_IO) to that board's drivers.
+
+To discriminate, measure against that board's GND while flexing the board:
+EN should sit steady at 0V while enabled, VMOT steady at 24V, and Teensy GND to
+board GND steady at 0.00V. Whichever one moves is the fault. A temporary jumper
+from that board's EN pin straight to GND bypasses the Teensy EN wire; if the
+dropouts stop, the EN net was the fault. Note that this jumper also defeats the
+`E 0` software disable and the emergency stop's ability to de-energize that
+board, so use it only as a bench test, never for normal operation.
+
+The firmware cannot see any of this. There is no current or voltage sense on
+the driver boards, so `StepperController` keeps counting steps it believes it
+issued, and `POS` keeps reporting angles for joints that are actually limp. The
+`HOMED` flag also stays true. After any dropout the reported pose is wrong and
+the web app will plan Cartesian moves against it. Re-home (`H ALL`) after every
+dropout; re-enabling with `E 1` does not recover the lost steps.
 
 **Problem:** Position drift
 - Verify USTEPS_PER_DEG calibration
