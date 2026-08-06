@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { ExecutionState, Waypoint } from '../motion/types';
+import { ShapePlane } from '../motion/Shapes';
 
 /**
  * PathPlannerPanel
@@ -35,10 +36,15 @@ export const PathPlannerPanel: React.FC = () => {
     updatePlannerConfig,
     exportPath,
     importPath,
-    firmwareStatus
+    firmwareStatus,
+    addCircle,
+    toolLocked
   } = useRobotStore();
 
   const [pathName, setPathName] = useState('');
+  const [circleRadius, setCircleRadius] = useState('30');
+  const [circlePlane, setCirclePlane] = useState<ShapePlane>('XY');
+  const [circleClockwise, setCircleClockwise] = useState(false);
   const [loopCount, setLoopCount] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -171,6 +177,75 @@ export const PathPlannerPanel: React.FC = () => {
                 Clear All
               </button>
             )}
+          </div>
+        </div>
+
+        {/* Figures. Described rather than taught: teaching a circle by hand
+            means dozens of points, each slightly wrong. The generator checks
+            the arm can reach the whole figure before adding anything, and says
+            so in the console when it cannot. */}
+        <div className="mb-3 p-2 bg-gray-50 rounded">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs font-semibold text-gray-700">Circle</span>
+            <span className="text-xs text-gray-500">
+              centred where the tool is now
+              {toolLocked ? ', tool held' : ''}
+            </span>
+          </div>
+          <div className="flex items-end gap-2 flex-wrap">
+            <label className="text-xs text-gray-600">
+              Radius
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={circleRadius}
+                  onChange={e => setCircleRadius(e.target.value)}
+                  disabled={isExecuting}
+                  className="w-16 px-1 py-0.5 border rounded text-right font-mono text-sm disabled:bg-gray-100"
+                />
+                <span className="text-gray-500">mm</span>
+              </div>
+            </label>
+
+            <label className="text-xs text-gray-600">
+              Plane
+              <select
+                value={circlePlane}
+                onChange={e => setCirclePlane(e.target.value as ShapePlane)}
+                disabled={isExecuting}
+                className="block px-1 py-0.5 border rounded text-sm disabled:bg-gray-100"
+              >
+                <option value="XY">XY (flat)</option>
+                <option value="XZ">XZ (upright)</option>
+                <option value="YZ">YZ (upright)</option>
+              </select>
+            </label>
+
+            <label className="flex items-center gap-1 text-xs text-gray-600 pb-1">
+              <input
+                type="checkbox"
+                checked={circleClockwise}
+                onChange={e => setCircleClockwise(e.target.checked)}
+                disabled={isExecuting}
+              />
+              Clockwise
+            </label>
+
+            <button
+              onClick={() =>
+                addCircle({
+                  radius: Number(circleRadius) / 1000,
+                  plane: circlePlane,
+                  clockwise: circleClockwise
+                })
+              }
+              disabled={isExecuting || !isConnected}
+              className="px-2 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
+            >
+              + Add circle
+            </button>
           </div>
         </div>
 

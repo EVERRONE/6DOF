@@ -15,7 +15,7 @@ import {
   JOINT_MAX_SPEED_DEG_S,
   NUM_JOINTS
 } from '../kinematics/robotModel';
-import { Vector3 } from '../kinematics/types';
+import { Rotation3, Vector3 } from '../kinematics/types';
 
 /**
  * Longest straight chord allowed between two samples of a Cartesian move, in
@@ -167,7 +167,14 @@ export class PathInterpolator {
     endPosition: Vector3,
     speed: number,
     acceleration: number,
-    pointsPerSecond: number
+    pointsPerSecond: number,
+    /**
+     * Tool orientation to hold along the whole line, or undefined to leave it
+     * free. Free, the wrist tips as the arm reaches - several degrees over a
+     * 20 mm move - which is fine for getting somewhere and useless for carrying
+     * a pen. Held, the solve is exactly determined and costs reach.
+     */
+    orientation?: Rotation3
   ): TrajectorySegment {
     const startPos = ForwardKinematics.position(startAngles);
 
@@ -189,7 +196,7 @@ export class PathInterpolator {
     // Check the far end before sampling anything. A failing IK solve is the
     // expensive one - it exhausts every seed - so discovering an unreachable
     // target after several hundred of them is the worst possible order.
-    const endCheck = this.ikSolver.solvePosition(endPosition, startAngles);
+    const endCheck = this.solveAt(endPosition, orientation, startAngles);
     if (!endCheck.success) {
       return { ...emptySegment(startAngles), distance, unreachableSamples: 1 };
     }
@@ -217,7 +224,7 @@ export class PathInterpolator {
         z: startPos.z + delta.z * s
       };
 
-      const ik = this.ikSolver.solvePosition(target, currentAngles);
+      const ik = this.solveAt(target, orientation, currentAngles);
 
       if (ik.success) {
         currentAngles = ik.jointAngles;
@@ -261,8 +268,18 @@ export class PathInterpolator {
       return [...waypoint.jointAngles];
     }
 
-    const ik = this.ikSolver.solvePosition(waypoint.position, currentAngles);
+    // A waypoint that carries an orientation wants it held. The field existed
+    // on the type from the start and was never read, so every Cartesian
+    // waypoint was solved for position alone.
+    const ik = this.solveAt(waypoint.position, waypoint.orientation, currentAngles);
     return ik.success ? ik.jointAngles : null;
+  }
+
+  /** Position-only or full-pose solve, depending on whether one was asked for. */
+  private solveAt(position: Vector3, orientation: Rotation3 | undefined, seed: number[]) {
+    return orientation
+      ? this.ikSolver.solvePose({ position, rotation: orientation }, seed)
+      : this.ikSolver.solvePosition(position, seed);
   }
 }
 

@@ -98,7 +98,9 @@ export class TrajectoryPlanner {
           waypoint.position,
           speed,
           this.config.defaultAcceleration,
-          this.config.pointsPerSecond
+          this.config.pointsPerSecond,
+          // Hold the tool along the line when the waypoint asks for it.
+          waypoint.orientation
         );
       } else {
         // Joint space interpolation.

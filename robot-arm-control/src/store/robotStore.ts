@@ -14,6 +14,7 @@ import {
   SavedPath
 } from '../motion/types';
 import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG } from '../motion/TrajectoryPlanner';
+import { ShapePlane, buildCircle } from '../motion/Shapes';
 import {
   HOME_POSE_DEG,
   JOINT_LIMITS_DEG,
@@ -130,6 +131,15 @@ interface RobotStore {
   updateWaypoint: (id: string, updates: Partial<Waypoint>) => void;
   clearWaypoints: () => void;
   teachCurrentPosition: (label?: string) => void;
+  /**
+   * Append a circle to the waypoint list, centred where the tool is now.
+   *
+   * Placing one by hand means teaching dozens of points and getting them all
+   * slightly wrong; describing it is exact. Returns false and says why when the
+   * arm cannot reach the whole figure - better found here than one point at a
+   * time with the arm already moving.
+   */
+  addCircle: (options: { radius: number; plane: ShapePlane; clockwise?: boolean }) => boolean;
 
   // Trajectory actions
   planTrajectory: () => void;
@@ -723,6 +733,48 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     };
 
     get().addWaypoint(newWaypoint);
+  },
+
+  addCircle: ({ radius, plane, clockwise }) => {
+    const { currentPosition, currentAngles, toolLocked, lockedRotation, plannerConfig } = get();
+
+    if (!currentPosition) {
+      get().logEvent('error', 'No tool position yet — connect and home first');
+      return false;
+    }
+    if (!(radius > 0)) {
+      get().logEvent('error', 'Circle radius must be greater than zero');
+      return false;
+    }
+
+    const seed = [
+      currentAngles.J1, currentAngles.J2, currentAngles.J3,
+      currentAngles.J4, currentAngles.J5, currentAngles.J6
+    ];
+
+    const result = buildCircle(
+      {
+        centre: currentPosition,
+        radius,
+        plane,
+        clockwise,
+        // Follow the Cartesian panel's lock, so the figure is drawn the way the
+        // rest of the app is currently moving.
+        orientation: toolLocked && lockedRotation ? lockedRotation : undefined,
+        speed: plannerConfig.defaultSpeed,
+        label: `${plane} circle`
+      },
+      seed
+    );
+
+    if (!result.ok) {
+      get().logEvent('error', result.message);
+      return false;
+    }
+
+    set(state => ({ waypoints: [...state.waypoints, ...result.waypoints] }));
+    get().logEvent('info', `Added ${result.message}`);
+    return true;
   },
 
   // ===== TRAJECTORY ACTIONS =====
