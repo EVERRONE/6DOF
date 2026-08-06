@@ -175,13 +175,15 @@ A wrong value here sends the joint away from its switch. The firmware reports
 joint's own range of travel, so the failure is bounded and diagnostic — but it
 still moves the joint the wrong way first.
 
-### Driver enable pin
+### Driver enable pin — RESOLVED
 
-The notes say one enable pin, 8, common to all drivers. `config.h` drives pin 8
-for J1–J3 and pin 9 for J4–J6. If pin 9 is not actually wired, the second
-shield's drivers follow whatever its EN pin is pulled to, which on a CNC Shield
-usually means permanently enabled — the motors would hold torque even when the
-firmware believes they are off.
+`config.h` is right: pin 8 drives J1–J3 and pin 9 drives J4–J6, and pin 9 is
+genuinely wired. Verified on the arm by sending `E 0` and turning J4 and J5 by
+hand — both released, so the second shield's drivers do follow the firmware.
+The old notes, which described a single common enable on pin 8, were wrong.
+
+This also rules out permanent energisation as a cause of the heat seen on J4 and
+J5: those drivers do switch off when asked.
 
 ### How to settle all three
 
