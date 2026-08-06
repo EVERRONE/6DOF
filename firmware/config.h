@@ -88,7 +88,7 @@ const float URDF_OFFSET_DEG[6] = {
 
 // Motion parameters
 const float DEFAULT_SPEED = 30.0;  // degrees/second
-const float HOMING_SPEED = 10.0;   // degrees/second
+const float HOMING_SPEED = 15.0;   // degrees/second (+50% vs. previous 10.0)
 const float HOMING_SPEED_FACTOR[6] = {
   1.0,  // J1
   1.0,  // J2
