@@ -36,6 +36,7 @@ import {
 } from '../kinematics/angleMapping';
 import { HybridIKSolver } from '../kinematics/HybridIKSolver';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
+import { QuaternionMath } from '../kinematics/QuaternionMath';
 import {
   classifyReachability,
   getDefaultReachabilityAtlas,
@@ -157,7 +158,8 @@ interface RobotStore {
   // Cartesian space actions
   setTargetPosition: (position: Vector3 | null) => void;
   cancelCartesianPlanning: (reason?: string) => void;
-  moveToPosition: (position: Vector3) => Promise<void>;
+  moveToPosition: (position: Vector3, targetOrientation?: Rotation3) => Promise<void>;
+  jogCartesian: (delta: { dx?: number; dy?: number; dz?: number; rx?: number; ry?: number; rz?: number; frame?: 'world' | 'tool' }) => Promise<void>;
   updateCurrentPosition: () => void;
   setCartesianMode: (mode: CartesianMode) => void;
   setIKEngineMode: (mode: IKEngineMode) => void;
@@ -1463,7 +1465,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   },
 
   // Move to Cartesian position using inverse kinematics
-  moveToPosition: async (position) => {
+  moveToPosition: async (position, targetOrientation) => {
     const {
       serialManager,
       currentAngles,
@@ -1471,13 +1473,14 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       connectionStatus,
       motorsEnabled,
       kinematicsFrameReady,
-      cartesianMode,
+      cartesianMode: storedCartesianMode,
       ikEngineMode,
       ikPrimaryMode,
       branchLockEnabled,
       resolvedRateEnabled,
       collisionCheckEnabled
     } = get();
+    const cartesianMode: CartesianMode = targetOrientation !== undefined ? 'pose_lock' : storedCartesianMode;
 
     const requestId = ++activePlannerRequestId;
     stopPlannerWorker();
@@ -1637,7 +1640,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       return;
     }
 
-    const lockedOrientation: Rotation3 = {
+    const lockedOrientation: Rotation3 = targetOrientation ?? {
       ...currentPoseFk.endEffectorPose.rotation
     };
 
@@ -1782,7 +1785,11 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         preferredBranch: ikSolveContext.preferredBranch,
         previousSolutionDeg: ikSolveContext.previousSolutionUrdfDeg,
         branchLockEnabled,
-        collisionCheckEnabled,
+        // tracking_local path-interpolation samples must not use collision steering:
+        // the conservative capsule model (30 mm base, 22 mm links) rejects near-target
+        // steps at valid wrist poses, stalling the solver exactly at the tolerance
+        // boundary.  Endpoint validation (endpoint_global) keeps the full check.
+        collisionCheckEnabled: intent === 'tracking_local' ? false : collisionCheckEnabled,
         boundaryDistanceM: reachabilityProbe.boundaryDistanceM,
         trackingMode
       };
@@ -2627,6 +2634,106 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         failureCategory
       );
     }
+  },
+
+  jogCartesian: async (delta) => {
+    const {
+      currentAngles,
+      firmwareConfig,
+      kinematicsFrameReady,
+      connectionStatus,
+      motorsEnabled,
+      homedJoints
+    } = get();
+
+    if (
+      !kinematicsFrameReady ||
+      connectionStatus !== ConnectionStatus.CONNECTED ||
+      !motorsEnabled ||
+      !firmwareConfig
+    ) return;
+    if (!homedJoints.J2 || !homedJoints.J3 || !homedJoints.J4 || !homedJoints.J5) return;
+
+    const constraintContract = ConstraintAdapterService.fromFirmwareConfig(firmwareConfig);
+    if (!constraintContract) return;
+
+    const offsets = constraintContract.urdfOffsetsDeg;
+    const currentLogicalAngles = [
+      currentAngles.J1,
+      currentAngles.J2,
+      currentAngles.J3,
+      currentAngles.J4,
+      currentAngles.J5,
+      currentAngles.J6
+    ];
+    const currentUrdfAngles = logicalToUrdfAngles(currentLogicalAngles, offsets);
+    const currentPoseFk = ForwardKinematics.solve(currentUrdfAngles);
+    if (!currentPoseFk.success) return;
+
+    const pos = currentPoseFk.endEffectorPose.position;
+    const rot = currentPoseFk.endEffectorPose.rotation;
+    const dx = delta.dx ?? 0;
+    const dy = delta.dy ?? 0;
+    const dz = delta.dz ?? 0;
+    const rx = delta.rx ?? 0;
+    const ry = delta.ry ?? 0;
+    const rz = delta.rz ?? 0;
+    const frame = delta.frame ?? 'world';
+
+    // Position delta: transform to world frame when jogging in tool frame
+    let newPos: Vector3;
+    if (frame === 'tool' && (dx !== 0 || dy !== 0 || dz !== 0)) {
+      const R = QuaternionMath.toRotationMatrix(QuaternionMath.fromEuler(rot));
+      newPos = {
+        x: pos.x + R[0][0] * dx + R[0][1] * dy + R[0][2] * dz,
+        y: pos.y + R[1][0] * dx + R[1][1] * dy + R[1][2] * dz,
+        z: pos.z + R[2][0] * dx + R[2][1] * dy + R[2][2] * dz
+      };
+    } else {
+      newPos = { x: pos.x + dx, y: pos.y + dy, z: pos.z + dz };
+    }
+
+    // Orientation delta: right-multiply for tool frame, left-multiply for world frame
+    let newRot: Rotation3;
+    if (rx === 0 && ry === 0 && rz === 0) {
+      newRot = { ...rot };
+    } else {
+      const qCurrent = QuaternionMath.fromEuler(rot);
+      const qDelta = QuaternionMath.fromEuler({ roll: rx, pitch: ry, yaw: rz });
+      const qNew = frame === 'tool'
+        ? QuaternionMath.multiply(qCurrent, qDelta)
+        : QuaternionMath.multiply(qDelta, qCurrent);
+      newRot = QuaternionMath.toEuler(qNew);
+    }
+
+    // Lightweight endpoint IK — no trajectory planning, no TQ upload.
+    // The firmware J command uses its own trapezoidal profile for smooth motion.
+    const { ikEngineMode, branchLockEnabled, serialManager } = get();
+    if (!serialManager) return;
+
+    const solver = ikEngineMode === 'hybrid_constrained_v2' ? hybridEndpointSolver : legacyEndpointSolver;
+    const ikResult = solver.solvePoseWeighted(
+      { position: newPos, rotation: newRot },
+      currentUrdfAngles,
+      {
+        intent: 'endpoint_global',
+        mode: 'pose_lock',
+        branchLockEnabled,
+        previousSolutionDeg: currentUrdfAngles,
+      }
+    );
+
+    if (!ikResult.success || !ikResult.jointAngles) return;
+
+    const logicalAngles = urdfToLogicalAngles(ikResult.jointAngles, offsets);
+    await serialManager.moveToAngles({
+      J1: logicalAngles[0],
+      J2: logicalAngles[1],
+      J3: logicalAngles[2],
+      J4: logicalAngles[3],
+      J5: logicalAngles[4],
+      J6: logicalAngles[5],
+    }, 30);
   },
 
   // ===== WAYPOINT ACTIONS =====

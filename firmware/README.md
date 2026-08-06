@@ -1,13 +1,13 @@
-# 6DOF Robot Arm - Teensy Firmware
+﻿# 6DOF Robot Arm - Teensy Firmware
 
 ## Overview
 This firmware controls a 6-axis robot arm using a Teensy 4.1 microcontroller with TMC2209 stepper drivers.
 
 ## Hardware Requirements
 - Teensy 4.1
-- 6× TMC2209 stepper drivers (1/16 microstepping)
-- 6× NEMA stepper motors
-- 4× Omron D2F-L endstops (J2-J5)
+- 6Ã— TMC2209 stepper drivers (1/16 microstepping)
+- 6Ã— NEMA stepper motors
+- 4Ã— Omron D2F-L endstops (J2-J5)
 - 24V power supply
 
 ## Pin Configuration
@@ -34,9 +34,9 @@ This firmware controls a 6-axis robot arm using a Teensy 4.1 microcontroller wit
 
 ### Steps
 1. Open `firmware.ino` in Arduino IDE
-2. Select **Tools → Board → Teensy 4.1**
-3. Select **Tools → USB Type → Serial**
-4. Select **Tools → CPU Speed → 600 MHz**
+2. Select **Tools â†’ Board â†’ Teensy 4.1**
+3. Select **Tools â†’ USB Type â†’ Serial**
+4. Select **Tools â†’ CPU Speed â†’ 600 MHz**
 5. Click **Upload**
 6. Wait for Teensy Loader to complete
 
@@ -82,6 +82,26 @@ Q
 ```
 - `Q\n` - Request current position (triggers immediate POS response)
 
+**Trajectory Queue (Cartesian execution):**
+```
+TQ CLEAR
+TQ PT <t_ms> <q1> <q2> <q3> <q4> <q5> <q6> <qd1> <qd2> <qd3> <qd4> <qd5> <qd6>
+TQ RUN
+TQ STOP
+TQ?
+```
+- `TQ` is intended for high-quality Cartesian trajectory playback.
+- Queue points use logical degrees (`q*`) and logical deg/s (`qd*`).
+- Queue playback is executed through timer-driven stepping (motion kernel v2).
+
+**Motion Kernel Diagnostics:**
+```
+MQ?
+MQ RESET
+```
+- `MQ?` returns `MQ STAT <tick_jitter_us> <queue_underrun> <step_overrun>`.
+- `MQ RESET` clears diagnostic counters.
+
 ### Response Format
 
 **Position Updates (sent every 100ms):**
@@ -110,6 +130,18 @@ OK <message>
 ERROR <message>
 ```
 
+**Trajectory Queue Events:**
+```
+TQ READY <count>
+TQ PROG <point_index> <elapsed_ms>
+TQ DONE
+```
+
+**Motion Kernel Event:**
+```
+MQ STAT <tick_jitter_us> <queue_underrun> <step_overrun>
+```
+
 ## Testing
 
 ### Test 1: Connection
@@ -124,15 +156,14 @@ Expected: `OK Motors enabled`
 
 ### Test 3: Move Single Joint
 Send: `J 10 0 0 0 0 0 20`
-Expected: J1 moves to 10 degrees at 20°/s
+Expected: J1 moves to 10 degrees at 20Â°/s
 
 ### Test 4: Home a Joint
 Send: `H 2`
 Expected:
 - J2 moves toward endstop
-- Stops and backs off
-- Re-approaches slowly
-- Moves to post-home position (5°)
+- Stops on the endstop
+- Sets logical angle to home zero (0 deg by default)
 - Response: `HOMED 2`
 
 ### Test 5: Emergency Stop
@@ -154,37 +185,44 @@ Default values are in `config.h`:
 
 **To calibrate:**
 1. Home the joint
-2. Command a 360° rotation: `J 360 0 0 0 0 0 20`
+2. Command a 360Â° rotation: `J 360 0 0 0 0 0 20`
 3. Measure actual rotation with a protractor
-4. Adjust `USTEPS_PER_DEG` in `config.h` if error > 5°
+4. Adjust `USTEPS_PER_DEG` in `config.h` if error > 5Â°
 5. Re-upload firmware
+
+### Calibration for Manual Joint Control (Angle Accuracy)
+If slider moves do not match actual joint motion, calibrate `USTEPS_PER_DEG` per joint:
+1. Home the joint.
+2. Command a known angle (e.g. 90Ã‚Â°): `J 0 0 0 90 0 0 20` (adjust for the joint you are testing).
+3. Measure the actual rotation.
+4. Compute: `newUSTEPS = oldUSTEPS * (commanded / actual)`.
+5. Update `USTEPS_PER_DEG` in `config.h` and re-upload firmware.
 
 ### Homing Sequence
 The homing sequence is:
-1. **Fast approach** - Move toward endstop at HOMING_SPEED (10°/s)
-2. **Back off** - Move 2° away from endstop
-3. **Slow approach** - Re-approach at 20% of HOMING_SPEED
-4. **Set zero** - Define current position as 0°
-5. **Move to post-home** - Move to safe position (defined in config.h)
+1. **Fast approach** - Move toward endstop at HOMING_SPEED (10Â°/s)
+2. **Set home angle** - Define current position as `HOME_LOGICAL_DEG` in `config.h`
+3. **Stay on endstop** - No backoff or post-home move
 
 ## Troubleshooting
 
 **Problem:** Motors don't move
-- Check enable pin is LOW (8 → GND through Teensy)
+- Check enable pin is LOW (8 â†’ GND through Teensy)
 - Verify driver Vref is set correctly (~0.6-1.0V depending on motor)
 - Check 24V power supply
 
 **Problem:** Position drift
 - Verify USTEPS_PER_DEG calibration
 - Check for mechanical binding
-- Ensure step pulses are 5µs wide
+- Ensure step pulses are 5Âµs wide
 
 **Problem:** Endstop not detected
-- Verify wiring: C → Teensy pin, NO → GND
+- Verify wiring: C â†’ Teensy pin, NO â†’ GND
 - Endstop should read LOW when triggered
 - Check INPUT_PULLUP is enabled
 
 **Problem:** Jerky motion
+- Prefer queue-based Cartesian execution (`TQ`) over many high-rate `J` commands
 - Increase TMC2209 microstepping interpolation
 - Reduce speed
 - Check for mechanical resistance
@@ -200,18 +238,20 @@ The homing sequence is:
 
 ## Safety Notes
 
-⚠️ **IMPORTANT:**
+âš ï¸ **IMPORTANT:**
 - Always test with motors disabled first
 - Keep E-stop circuit functional
 - Never bypass endstop safety
-- Start with low speeds (5-10°/s)
+- Start with low speeds (5-10Â°/s)
 - Verify soft limits in `config.h` match physical robot
 - Add mechanical hard stops as backup
 
 ## Next Steps
 
 After firmware is working:
-1. ✅ Verify all 6 joints move correctly
-2. ✅ Calibrate USTEPS_PER_DEG for each joint
-3. ✅ Test homing sequence
-4. ✅ Move to Phase 2: Web Application
+1. âœ… Verify all 6 joints move correctly
+2. âœ… Calibrate USTEPS_PER_DEG for each joint
+3. âœ… Test homing sequence
+4. âœ… Move to Phase 2: Web Application
+
+

@@ -174,10 +174,42 @@ npm install three @react-three/fiber @react-three/drei urdf-loader zustand
 
 ### Calibration
 1. Home all joints
-2. Move to 5+ known positions
-3. Measure actual position with ruler/caliper
-4. If error >5mm, adjust DH parameters
-5. Repeat until accurate
+2. Use Calibration Panel to zero offsets (CAL ZERO)
+3. Move to 5+ known positions
+4. Measure actual position with ruler/caliper
+5. If error >5mm, adjust calibration scale/offset or DH parameters
+6. Save calibration to EEPROM (CAL SAVE)
+7. Configure operational home pose if needed (HP SETALL / HP EN 1)
+8. Run `H ALL` and verify post-home move matches digital startup pose
+9. Save operational home pose to EEPROM (HP SAVE)
+10. Repeat until accurate
+
+### Cartesian Operator Flow
+1. Connect to robot
+2. Enable motors
+3. Home joints (`H ALL`)
+4. Press `Current -> Target` and verify the red marker overlaps the end-effector in 3D
+5. Confirm firmware reports trajectory queue capability in `CFG?` (`capabilities.trajectoryQueue=true`)
+6. Select Cartesian mode (`Pose Lock` default, or `Position Only` if needed)
+7. Enter XYZ target in Cartesian panel
+8. Click `Move to Position` (trajectory uploads via `TQ` and runs queue on firmware)
+9. Verify planner state transitions:
+   - `stage1_fast` appears quickly (target <500 ms responsiveness)
+   - `stage2_refine` appears while strict trajectory is refined
+   - `ready` appears before queue upload/run
+10. Verify move quality: straight path, smooth motion, and expected wrist behavior for selected mode
+11. Regression check near URDF default: from around `(-202.2, -0.5, 311.0) mm`, command `(-220, -0.5, 311) mm` and verify successful execution
+12. If `Pose Lock` rejects but `Position Only` succeeds, treat as orientation constraint (`orientation_infeasible`), not workspace failure
+13. Query motion diagnostics (`MQ?`) or check panel diagnostics for jitter/queue underrun/step overrun after each tuning run
+14. IK V3 checks:
+   - `IK Runtime` set to `Analytic Primary`
+   - `Branch continuity lock` enabled
+   - `Resolved-rate tracking` enabled for smooth Cartesian interpolation
+   - `Collision checks` enabled only after validating capsule model behavior on your hardware
+15. Optional feature-flag overrides:
+   - `REACT_APP_IK_ANALYTIC_PRIMARY_V1=0` -> force numeric primary
+   - `REACT_APP_IK_RESOLVED_RATE_V1=0` -> disable resolved-rate tracking
+   - `REACT_APP_IK_COLLISION_CHECK_V1=1` -> enable collision checks by default
 
 ---
 

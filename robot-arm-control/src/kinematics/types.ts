@@ -19,11 +19,30 @@ export interface Rotation3 {
 }
 
 /**
+ * Unit quaternion (w + xi + yj + zk)
+ */
+export interface Quaternion {
+  w: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
  * 6DOF Pose (position + orientation)
  */
 export interface Pose {
   position: Vector3;
+  // Euler rotation is retained for UI I/O compatibility.
   rotation: Rotation3;
+}
+
+/**
+ * 6DOF Pose represented with quaternion orientation.
+ */
+export interface PoseQuat {
+  position: Vector3;
+  orientation: Quaternion;
 }
 
 /**
@@ -82,11 +101,65 @@ export interface FKResult {
  * Inverse Kinematics Result
  */
 export interface IKResult {
-  jointAngles: number[];  // Solution in radians
+  jointAngles: number[];  // Solution in degrees
   success: boolean;
   error?: string;
+  errorCode?: string;
   iterations?: number;
   residualError?: number;
+  quality?: IKQualityMetrics;
+  branchId?: IKBranchId;
+  solverPath?: IKSolverPath;
+  stage?: IKSolveStage;
+  sampleIndex?: number;
+  limitsSource?: IKLimitsSource;
+  angleFrame?: IKAngleFrame;
+  singularityFlags?: string[];
+  limitMarginDeg?: number;
+  boundaryDistanceM?: number | null;
+  collisionFree?: boolean;
+  failureCategory?:
+    | 'fk_failure'
+    | 'max_iterations'
+    | 'stage2_timeout'
+    | 'singularity'
+    | 'joint_limit'
+    | 'orientation_infeasible'
+    | 'queue_upload_failed'
+    | 'invalid_target'
+    | 'collision'
+    | 'boundary_clamped'
+    | 'branch_discontinuity';
+  notes?: string[];
+}
+
+export type IKAngleFrame = 'logical' | 'urdf';
+export type IKLimitsSource = 'firmware' | 'urdf';
+export type IKSolveStage =
+  | 'endpoint'
+  | 'stage1_fast'
+  | 'stage2_refine'
+  | 'interpolation'
+  | 'execution'
+  | 'unknown';
+
+export interface IKSolveContext {
+  angleFrame: IKAngleFrame;
+  limitsSource: IKLimitsSource;
+  previousSolutionUrdfDeg: number[];
+  preferredBranch?: IKBranchId;
+}
+
+export interface IKSampleDiagnostic {
+  stage: IKSolveStage;
+  sampleIndex: number;
+  tSec: number;
+  residualPosM: number;
+  residualOriRad: number;
+  weightedResidual: number;
+  branchId?: string;
+  flags: string[];
+  note?: string;
 }
 
 /**
@@ -103,7 +176,95 @@ export interface IKConfig {
 }
 
 /**
+ * Optional tuning for weighted full-pose IK solve.
+ */
+export interface IKSolveOptions {
+  positionWeight?: number;
+  orientationWeight?: number;
+  intent?: IKSolveIntent;
+  mode?: CartesianMode;
+  maxStepDeg?: number;
+  maxJointVelocityDegS?: number;
+  maxJointAccelerationDegS2?: number;
+  trackingMaxIterations?: number;
+  maxSeeds?: number;
+  maxStages?: number;
+  // Dimensionless damping range used on a normalized J^T*J scale.
+  minDamping?: number;
+  maxDamping?: number;
+  dampingGrowth?: number;
+  dampingShrink?: number;
+  singularityThreshold?: number;
+  // Dimensionless posture regularization weight on the normalized solve scale.
+  postureWeight?: number;
+  tolerancePositionM?: number;
+  toleranceOrientationRad?: number;
+  toleranceWeighted?: number;
+  computeDiagnostics?: boolean;
+  diagnosticStride?: number;
+  logDiagnostics?: boolean;
+  activeConstraints?: string[];
+  preferredBranch?: IKBranchId | null;
+  previousSolutionDeg?: number[] | null;
+  branchLockEnabled?: boolean;
+  boundaryDistanceM?: number | null;
+  collisionCheckEnabled?: boolean;
+  trackingMode?: IKTrackingMode;
+}
+
+/**
+ * Detailed quality information for IK convergence diagnostics.
+ */
+export interface IKQualityMetrics {
+  positionResidualM: number;
+  orientationResidualRad: number;
+  weightedResidual: number;
+  minSingularValue: number;
+  conditionNumber: number;
+  activeConstraints: string[];
+  jointParticipation: number[];
+  iterations: number;
+  damping: number;
+  seedIndex?: number;
+  branchId?: string;
+  retryStage?: string;
+  linearityErrorMm?: number;
+  jointLimitMarginDeg?: number;
+}
+
+/**
  * Jacobian Matrix (6 x n) for velocity kinematics
  * Maps joint velocities to end-effector velocities
  */
 export type JacobianMatrix = number[][];
+
+export type CartesianMode = 'pose_lock' | 'position_only';
+export type IKEngineMode = 'legacy_dls_v1' | 'hybrid_constrained_v2';
+export type IKSolveProfile = 'smooth' | 'balanced' | 'precision';
+export type IKSolveIntent = 'endpoint_global' | 'tracking_local' | 'resolved_rate';
+export type IKTrackingMode = 'iterative_pose' | 'resolved_rate';
+export type IKSolverPath = 'analytic' | 'analytic_refined' | 'numeric_fallback';
+export type IKBranchId =
+  | 'SL_EU_WF'
+  | 'SL_EU_WN'
+  | 'SL_ED_WF'
+  | 'SL_ED_WN'
+  | 'SR_EU_WF'
+  | 'SR_EU_WN'
+  | 'SR_ED_WF'
+  | 'SR_ED_WN';
+
+export interface IKRequest {
+  targetPosition: Vector3;
+  targetOrientationQuat: Quaternion;
+  mode: CartesianMode;
+  intent: IKSolveIntent;
+  preferredBranch?: IKBranchId;
+  previousSolutionDeg?: number[];
+}
+
+export interface IKPlanningBudget {
+  stage1BudgetMs: number;
+  stage2MaxMs: number;
+  trackingMaxIterations: number;
+}

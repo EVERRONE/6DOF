@@ -120,11 +120,14 @@ export function getJointLimits(): { min: number[]; max: number[] } {
   const max: number[] = [];
 
   for (const joint of ROBOT_KINEMATIC_CHAIN) {
-    if (joint.limit) {
+    if (joint.type === 'continuous') {
+      min.push(-2 * Math.PI);
+      max.push(2 * Math.PI);
+    } else if (joint.limit) {
       min.push(joint.limit.lower);
       max.push(joint.limit.upper);
     } else {
-      // Continuous joint (J6)
+      // Safe fallback when no explicit limit is provided.
       min.push(-2 * Math.PI);
       max.push(2 * Math.PI);
     }

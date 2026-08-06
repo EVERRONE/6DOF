@@ -37,10 +37,10 @@ export const StatusBar: React.FC = () => {
 
           {/* Current joint angles */}
           <div className="text-sm text-gray-700">
-            <span className="font-medium">Angles:</span> J1:{currentAngles.J1.toFixed(1)}°
-            J2:{currentAngles.J2.toFixed(1)}° J3:{currentAngles.J3.toFixed(1)}°
-            J4:{currentAngles.J4.toFixed(1)}° J5:{currentAngles.J5.toFixed(1)}°
-            J6:{currentAngles.J6.toFixed(1)}°
+            <span className="font-medium">Angles:</span> J1:{currentAngles.J1.toFixed(1)}deg
+            J2:{currentAngles.J2.toFixed(1)}deg J3:{currentAngles.J3.toFixed(1)}deg
+            J4:{currentAngles.J4.toFixed(1)}deg J5:{currentAngles.J5.toFixed(1)}deg
+            J6:{currentAngles.J6.toFixed(1)}deg
           </div>
         </div>
 

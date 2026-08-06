@@ -1,6 +1,7 @@
 // Motion planning type definitions for 6DOF robot arm
 
-import { Vector3 } from '../kinematics/types';
+import { IKResult, Rotation3, Vector3 } from '../kinematics/types';
+import { IKTrackingMode } from '../kinematics/types';
 
 /**
  * A waypoint in the path (Cartesian space)
@@ -48,6 +49,19 @@ export interface TrajectorySegment {
   points: TrajectoryPoint[];
   duration: number;       // total time in seconds
   distance: number;       // Cartesian distance in meters
+}
+
+export interface CartesianInterpolationResult {
+  success: boolean;
+  segment: TrajectorySegment;
+  error?: string;
+  failedAtTime?: number;
+  timedOut?: boolean;
+  timeoutAtSampleIndex?: number;
+  timeoutAtTimeSec?: number;
+  targetOrientation?: Rotation3;
+  lastIK?: IKResult;
+  trackingMode?: IKTrackingMode;
 }
 
 /**
@@ -115,4 +129,5 @@ export interface SavedPath {
   config: PathPlannerConfig;
   createdAt: string;
   version: string;
+  kinematicsFrame?: 'urdf_chain_v1' | 'legacy_dh_v1';
 }

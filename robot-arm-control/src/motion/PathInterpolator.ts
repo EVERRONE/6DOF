@@ -789,33 +789,37 @@ export class PathInterpolator {
     return 10 * u3 - 15 * u4 + 6 * u5;
   }
 
-  // One-pass 3-tap weighted average applied to internal path points before velocity
+  // Three-pass 3-tap weighted average applied to internal path points before velocity
   // computation.  IK samples converge within tolerance but can have ~0.1-0.3° noise
   // between consecutive solutions.  Hermite amplifies these micro-oscillations into
-  // audible bumps.  Smoothing reduces the noise while preserving endpoints and overall
-  // path shape.  A single pass with α=0.5 is deliberately light: at 2.5 mm IK
-  // tolerance the added Cartesian error is < 0.3 mm, well within Stage-2 precision gates.
+  // audible bumps.  Three passes with α=0.5 attenuate high-frequency IK noise more
+  // aggressively while preserving endpoints and overall path shape.  The added
+  // Cartesian error remains well within Stage-2 precision gates.
   private smoothJointAngles(points: TrajectoryPoint[]): void {
     if (points.length <= 2) return;
     const n = points.length;
-    // Build smoothed values for interior points only (endpoints must remain unchanged).
-    const smoothed: number[][] = new Array(n - 2);
-    for (let i = 1; i < n - 1; i++) {
-      const prev = points[i - 1].jointAngles;
-      const curr = points[i].jointAngles;
-      const next = points[i + 1].jointAngles;
-      smoothed[i - 1] = curr.map((v, j) => 0.25 * prev[j] + 0.5 * v + 0.25 * next[j]);
-    }
-    for (let i = 1; i < n - 1; i++) {
-      points[i] = { ...points[i], jointAngles: smoothed[i - 1] };
+    for (let pass = 0; pass < 3; pass++) {
+      // Build smoothed values for interior points only (endpoints must remain unchanged).
+      const smoothed: number[][] = new Array(n - 2);
+      for (let i = 1; i < n - 1; i++) {
+        const prev = points[i - 1].jointAngles;
+        const curr = points[i].jointAngles;
+        const next = points[i + 1].jointAngles;
+        smoothed[i - 1] = curr.map((v, j) => 0.25 * prev[j] + 0.5 * v + 0.25 * next[j]);
+      }
+      for (let i = 1; i < n - 1; i++) {
+        points[i] = { ...points[i], jointAngles: smoothed[i - 1] };
+      }
     }
   }
 
   // Firmware motor hard limit is STREAM_MAX_SPEED_DEG_S = 120 deg/s (config.h).
   // Cubic Hermite interpolation can overshoot knot velocities by ~1.5x, so knot
-  // velocities are capped at 80 deg/s (80 * 1.5 = 120) to keep peak motion within
-  // the motor limit and prevent step-skipping / audible cracking.
-  private static readonly MAX_JOINT_VEL_DEG_S = 80.0;
+  // velocities are capped at 55 deg/s (55 * 1.5 = 82.5) to keep peak motion well
+  // within the motor limit and prevent step-skipping / audible cracking.
+  // Previously 80 deg/s (80 * 1.5 = 120) left zero headroom; any timing jitter or
+  // IK noise pushed peaks over the limit causing audible crackling.
+  private static readonly MAX_JOINT_VEL_DEG_S = 55.0;
 
   private populateJointVelocities(points: TrajectoryPoint[]): void {
     if (points.length === 0) return;

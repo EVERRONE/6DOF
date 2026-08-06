@@ -148,7 +148,7 @@ describe('TrajectoryExecutionService', () => {
     );
 
     const uploadedVelocities = (serialManager.enqueueTrajectoryPoint as jest.Mock).mock.calls.map((call) => call[2]);
-    expect(uploadedVelocities[1]).toEqual([220, -220, 10, 0, 220, -220]);
+    expect(uploadedVelocities[1]).toEqual([85, -85, 10, 0, 85, -85]);
   });
 
   test('throws when device reports zero queued points after upload', async () => {
@@ -192,7 +192,7 @@ describe('TrajectoryExecutionService', () => {
 
     expect(serialManager.clearTrajectoryQueue).toHaveBeenCalledTimes(2);
     const velocityCalls = (serialManager.enqueueTrajectoryPoint as jest.Mock).mock.calls.map((call) => call[2]);
-    expect(velocityCalls[1]).toEqual([220, -220, 10, 0, 220, -220]);
-    expect(velocityCalls[3]).toEqual([120, -120, 10, 0, 120, -120]);
+    expect(velocityCalls[1]).toEqual([85, -85, 10, 0, 85, -85]);
+    expect(velocityCalls[3]).toEqual([60, -60, 10, 0, 60, -60]);
   });
 });

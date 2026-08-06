@@ -11,8 +11,8 @@ export interface TrajectoryLimitViolation {
   max: number;
 }
 
-const MAX_QUEUE_UPLOAD_VELOCITY_DEG_S = 220;
-const RETRY_QUEUE_UPLOAD_VELOCITY_DEG_S = 120;
+const MAX_QUEUE_UPLOAD_VELOCITY_DEG_S = 85;
+const RETRY_QUEUE_UPLOAD_VELOCITY_DEG_S = 60;
 
 const toJointAngles = (angles: number[]): JointAngles => ({
   J1: angles[0] ?? 0,
@@ -101,6 +101,11 @@ export class TrajectoryExecutionService {
   ): Promise<void> {
     const queueTimesMs = this.normalizeQueueTimestampsMs(points);
     const uploadWithVelocityLimit = async (maxAbsVelocityDegS: number): Promise<void> => {
+      try {
+        await serialManager.stopTrajectoryQueue();
+      } catch {
+        // Queue may already be stopped — safe to ignore.
+      }
       await serialManager.clearTrajectoryQueue();
       for (let i = 0; i < points.length; i++) {
         const point = points[i];

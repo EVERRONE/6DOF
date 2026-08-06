@@ -8,13 +8,22 @@ void HomingController::begin() {
   for (int i = 0; i < 6; i++) {
     if (HAS_ENDSTOP[i]) {
       pinMode(ENDSTOP_PINS[i], INPUT_PULLUP);
+      bool raw = digitalRead(ENDSTOP_PINS[i]) == LOW;
+      lastRawState_[i] = raw;
+      debouncedState_[i] = raw;
+      lastChangeMs_[i] = millis();
+    } else {
+      lastRawState_[i] = false;
+      debouncedState_[i] = false;
+      lastChangeMs_[i] = millis();
     }
   }
 }
 
 bool HomingController::isEndstopTriggered(int jointIndex) {
   if (!HAS_ENDSTOP[jointIndex]) return false;
-  return digitalRead(ENDSTOP_PINS[jointIndex]) == LOW;  // Active LOW
+  updateEndstopDebounce(jointIndex);
+  return debouncedState_[jointIndex];
 }
 
 EndstopState HomingController::getEndstopState() {
@@ -34,48 +43,27 @@ bool HomingController::homeJoint(int jointIndex) {
   // Cancel any ongoing movement before starting homing
   stepper_.emergencyStop();
   stepper_.clearStop();
-
-  // 1. Fast approach to endstop
-  if (!findEndstop(jointIndex)) {
-    if (stepper_.isStopRequested()) {
-      Serial.println("OK Homing aborted");
+  // 1. Move toward endstop until triggered (no backoff / fine approach)
+  if (!isEndstopTriggered(jointIndex)) {
+    if (!findEndstop(jointIndex)) {
+      if (stepper_.isStopRequested()) {
+        Serial.println("OK Homing aborted");
+        return false;
+      }
+      Serial.println("ERROR Endstop not found");
       return false;
     }
-    Serial.println("ERROR Endstop not found");
-    return false;
   }
 
-  // 2. Back off
-  backOff(jointIndex);
   if (stepper_.isStopRequested()) {
     Serial.println("OK Homing aborted");
     return false;
   }
 
-  // 3. Slow fine approach
-  fineApproach(jointIndex);
-  if (stepper_.isStopRequested()) {
-    Serial.println("OK Homing aborted");
-    return false;
-  }
-
-  // 4. Set zero position
-  JointAngles zeros;
-  stepper_.setCurrentAngles(zeros);
-
-  // 5. Move to post-home position
-  JointAngles postHome;
-  postHome[jointIndex] = POST_HOME_ANGLES[jointIndex];
-  stepper_.setTargetAngles(postHome, HOMING_SPEED);
-
-  while (stepper_.isMoving()) {
-    stepper_.update();
-    checkSerialForStop();
-    if (stepper_.isStopRequested()) {
-      Serial.println("OK Homing aborted");
-      return false;
-    }
-  }
+  // 2. Set zero position at the endstop
+  JointAngles current = stepper_.getCurrentAngles();
+  current[jointIndex] = HOME_LOGICAL_DEG[jointIndex];
+  stepper_.setCurrentAngles(current);
 
   Serial.print("HOMED ");
   Serial.println(jointIndex + 1);
@@ -85,6 +73,7 @@ bool HomingController::homeJoint(int jointIndex) {
 
 bool HomingController::findEndstop(int jointIndex) {
   int direction = HOME_TOWARD_MIN[jointIndex] ? -1 : 1;
+  float homingSpeed = HOMING_SPEED * HOMING_SPEED_FACTOR[jointIndex];
   int maxSteps = (int)(360.0 * USTEPS_PER_DEG[jointIndex]);  // Max travel
 
   for (int i = 0; i < maxSteps; i++) {
@@ -94,7 +83,7 @@ bool HomingController::findEndstop(int jointIndex) {
     // Check serial for E-Stop every 100 steps
     if (i % 100 == 0) checkSerialForStop();
 
-    stepper_.stepJoint(jointIndex, direction, HOMING_SPEED);
+    stepper_.stepJoint(jointIndex, direction, homingSpeed);
   }
 
   return false;  // Endstop not found within range
@@ -102,12 +91,13 @@ bool HomingController::findEndstop(int jointIndex) {
 
 void HomingController::backOff(int jointIndex) {
   int direction = HOME_TOWARD_MIN[jointIndex] ? 1 : -1;
+  float homingSpeed = HOMING_SPEED * HOMING_SPEED_FACTOR[jointIndex];
   int steps = (int)(BACKOFF_DISTANCE * USTEPS_PER_DEG[jointIndex]);
 
   for (int i = 0; i < steps; i++) {
     if (stepper_.isStopRequested()) return;
 
-    stepper_.stepJoint(jointIndex, direction, HOMING_SPEED);
+    stepper_.stepJoint(jointIndex, direction, homingSpeed);
 
     // Stop if endstop released
     if (!isEndstopTriggered(jointIndex)) break;
@@ -116,7 +106,8 @@ void HomingController::backOff(int jointIndex) {
 
 void HomingController::fineApproach(int jointIndex) {
   int direction = HOME_TOWARD_MIN[jointIndex] ? -1 : 1;
-  float fineSpeed = HOMING_SPEED * 0.2;  // 20% of homing speed
+  float homingSpeed = HOMING_SPEED * HOMING_SPEED_FACTOR[jointIndex];
+  float fineSpeed = homingSpeed * 0.2;  // 20% of homing speed
   int maxSteps = (int)(BACKOFF_DISTANCE * 2 * USTEPS_PER_DEG[jointIndex]);
   int count = 0;
 
@@ -150,6 +141,19 @@ bool HomingController::homeAll() {
     }
   }
 
-  Serial.println("OK All joints homed");
   return true;
+}
+
+void HomingController::updateEndstopDebounce(int jointIndex) {
+  if (!HAS_ENDSTOP[jointIndex]) return;
+
+  bool raw = digitalRead(ENDSTOP_PINS[jointIndex]) == LOW;  // Active LOW
+  if (raw != lastRawState_[jointIndex]) {
+    lastRawState_[jointIndex] = raw;
+    lastChangeMs_[jointIndex] = millis();
+  }
+
+  if ((millis() - lastChangeMs_[jointIndex]) >= ENDSTOP_DEBOUNCE_MS) {
+    debouncedState_[jointIndex] = raw;
+  }
 }

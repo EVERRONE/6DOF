@@ -168,8 +168,10 @@ export class HybridIKSolver {
     const mode = params.mode || 'pose_lock';
     const intent = params.intent || 'endpoint_global';
     const profile = params.profile || 'balanced';
+    // tracking_local/resolved_rate caps at 2 stages but respects caller overrides.
+    // Previously hard-coded to 1, which silently discarded the relaxed-fallback's maxStages:2.
     const maxStages = intent === 'tracking_local' || intent === 'resolved_rate'
-      ? 1
+      ? Math.min(2, params.maxStages ?? params.overrideOptions?.maxStages ?? 1)
       : (params.maxStages || params.overrideOptions?.maxStages || 3);
 
     const stageOptions = this.buildStages(mode, profile, params.overrideOptions).slice(0, maxStages);
@@ -201,8 +203,9 @@ export class HybridIKSolver {
     let bestSuccess: { result: IKResult; source: string; cost: number; branchId?: IKBranchId } | null = null;
     let bestFailure: { result: IKResult; source: string; cost: number; branchId?: IKBranchId } | null = null;
 
+    // Same override fix as maxStages above: respect caller-provided maxSeeds for tracking.
     const maxAnalytic = intent === 'tracking_local' || intent === 'resolved_rate'
-      ? 1
+      ? Math.min(2, params.maxSeeds ?? params.overrideOptions?.maxSeeds ?? 1)
       : (params.maxSeeds || params.overrideOptions?.maxSeeds || 6);
     const candidatePool: Array<{ seed: number[]; branchId?: IKBranchId; source: string }> = [];
 

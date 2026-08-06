@@ -3,6 +3,7 @@ import { ConnectionPanel } from './components/ConnectionPanel';
 import { JointControlPanel } from './components/JointControlPanel';
 import { CartesianControlPanel } from './components/CartesianControlPanel';
 import { PathPlannerPanel } from './components/PathPlannerPanel';
+import { CalibrationPanel } from './components/CalibrationPanel';
 import { RobotViewer3D } from './components/RobotViewer3D';
 import { StatusBar } from './components/StatusBar';
 import { EmergencyStop } from './components/EmergencyStop';
@@ -24,6 +25,7 @@ function App() {
         <div className="w-1/3 overflow-y-auto border-r bg-white">
           <PathPlannerPanel />
           <CartesianControlPanel />
+          <CalibrationPanel />
           <JointControlPanel />
         </div>
 

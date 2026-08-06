@@ -1,310 +1,396 @@
 # 6DOF Robot Arm - Serial Protocol Specification
 
-**Version:** 1.0
-**Date:** February 2026
+**Version:** 1.4  
+**Date:** February 2026  
 **Baud Rate:** 115200 8N1
 
 ---
 
 ## Overview
 
-The robot arm uses an ASCII-based serial protocol for communication between the web application and Teensy firmware. Commands are sent from the host (browser) to the robot, and responses/updates are sent from the robot back to the host.
-
----
+The robot arm uses an ASCII line protocol over serial.
+Each command is newline-terminated (`\n`).
 
 ## Command Format
 
-All commands are ASCII strings terminated with a newline character (`\n`).
-
-### General Structure
-```
-<COMMAND_TYPE> [<ARGUMENTS>]\n
+```text
+<COMMAND> [ARGS]\n
 ```
 
----
+## Commands (Host -> Robot)
 
-## Commands (Host → Robot)
+### 1) Move Joints (`J`)
 
-### 1. Move to Joint Angles (J)
-
-**Format:**
-```
+```text
 J <j1> <j2> <j3> <j4> <j5> <j6> <speed>
 ```
 
-**Parameters:**
-- `j1` to `j6` - Target joint angles in degrees (float)
-- `speed` - Movement speed in degrees/second (float)
+- Angles are logical degrees.
+- Speed is logical deg/s.
+- Firmware clamps angles to configured limits.
 
-**Example:**
-```
-J 10.5 20.0 35.5 100.0 180.5 -45.0 30.0
-```
+Response:
 
-**Response:**
-```
+```text
 OK Moving
 ```
 
-**Notes:**
-- Angles are automatically clamped to joint limits (defined in firmware config.h)
-- All joints move simultaneously (coordinated motion)
-- Movement completes when all joints reach target
-
 ---
 
-### 2. Home Joints (H)
+### 2) Home (`H`)
 
-**Format:**
-```
+```text
 H <joints>
 ```
 
-**Parameters:**
-- `joints` - Joint numbers to home (1-6), or "ALL"
+Examples:
 
-**Examples:**
-```
-H 2          # Home joint 2 only
-H 2345       # Home joints 2, 3, 4, 5 in sequence
-H ALL        # Home all joints with endstops
+```text
+H 2
+H 2345
+H ALL
 ```
 
-**Response (per joint):**
-```
-HOMED <joint_number>
+Behavior:
+- Only joints with endstops can be homed (`J2..J5`).
+- Endstop homing is unchanged: move to switch -> set logical zero -> stay on switch.
+- `H ALL` homes in sequence (`J2 -> J3 -> J4 -> J5`).
+- If operational home pose is enabled, `H ALL` then executes post-home move to configured home-pose targets.
+
+Responses:
+
+```text
+HOMED <joint_number>      # per joint
+HOMEPOSE_REACHED          # only when post-home move succeeds
+OK All joints homed       # final H ALL success
 ```
 
-**Final Response:**
-```
-OK All joints homed    # (if H ALL was used)
-```
-
-**Notes:**
-- Only joints with endstops can be homed (J2, J3, J4, J5)
-- Homing sequence: fast approach → back off → slow approach → set zero → move to post-home position
-- Joints are homed sequentially, not simultaneously
-
-**Error Conditions:**
-- `ERROR No endstop on this joint` - Attempted to home J1 or J6
-- `ERROR Endstop not found` - Endstop not triggered within maximum travel
+Errors:
+- `ERROR No endstop on this joint`
+- `ERROR Endstop not found`
+- `ERROR HOMEPOSE <reason>`
 
 ---
 
-### 3. Query Position (Q)
+### 3) Query Position (`Q`)
 
-**Format:**
-```
+```text
 Q
 ```
 
-**Response:**
-Immediately sends current position (same format as periodic POS messages).
-
-**Example:**
-```
-POS 10.50 20.00 35.50 100.00 180.50 -45.00
-```
+Response: immediate `POS ...`
 
 ---
 
-### 4. Enable/Disable Motors (E)
+### 4) Enable Motors (`E`)
 
-**Format:**
-```
-E <state>
-```
-
-**Parameters:**
-- `state` - `1` to enable, `0` to disable
-
-**Examples:**
-```
-E 1    # Enable motors
-E 0    # Disable motors
+```text
+E <0|1>
 ```
 
-**Response:**
-```
-OK Motors enabled     # or
+Responses:
+
+```text
+OK Motors enabled
 OK Motors disabled
 ```
 
-**Notes:**
-- Motors are disabled on startup for safety
-- Disabling motors immediately stops any ongoing motion
-
 ---
 
-### 5. Emergency Stop (S)
+### 5) Emergency Stop (`S`)
 
-**Format:**
-```
+```text
 S
 ```
 
-**Response:**
-```
+Response:
+
+```text
 OK Emergency stop
 ```
 
-**Behavior:**
-- Immediately halts all joint motion
-- Sets target position to current position
-- Does NOT disable motors (they remain holding position)
-- Robot state becomes ESTOPPED
+---
+
+### 6) Configuration (`CFG`)
+
+Query:
+
+```text
+CFG?
+```
+
+Response:
+
+```text
+CFG {json}
+```
+
+Set (calibration arrays only):
+
+```text
+CFG <json>
+```
+
+Notes:
+- Includes joint config, calibration, timing settings, and `homePose` object.
+- Use `CAL SAVE` to persist calibration.
 
 ---
 
-## Responses (Robot → Host)
+### 7) Calibration (`CAL`)
 
-### Position Update (POS)
-
-**Format:**
+```text
+CAL SET J<n> <scale> <offset>
+CAL ZERO J<n> <logical_deg>
+CAL SAVE
+CAL LOAD
+CAL RESET
 ```
+
+Notes:
+- `J<n>` is 1-indexed (`J1..J6`).
+- `CAL ZERO` adjusts offset at current physical pose.
+
+---
+
+### 8) Relative Jog (`JR`)
+
+```text
+JR J<n> <delta_deg> <speed>
+```
+
+- Delta is relative logical degrees.
+- Speed is logical deg/s.
+
+---
+
+### 9) Operational Home Pose (`HP`)
+
+Use these commands to configure post-`H ALL` operational home positioning.
+
+```text
+HP?
+HP EN <0|1>
+HP SET J<n> <deg>         # J2..J5 only
+HP SETALL <j2> <j3> <j4> <j5>
+HP SPD <deg_s>            # clamped to 5..40
+HP SAVE
+HP LOAD
+HP RESET
+```
+
+Notes:
+- Endstop zero reference remains unchanged.
+- Post-home operational move applies only to `J2..J5`.
+- Trigger is `H ALL` only.
+- UI uses `homePose.jointsDeg` as URDF-default anchor for `J2..J5`
+  (with direction multipliers applied for mirrored joints such as J5).
+
+---
+
+### 10) Trajectory Queue (`TQ`)
+
+Queue-based execution is used for high-quality Cartesian motion.
+
+```text
+TQ CLEAR
+TQ PT <t_ms> <q1> <q2> <q3> <q4> <q5> <q6> <qd1> <qd2> <qd3> <qd4> <qd5> <qd6>
+TQ RUN
+TQ STOP
+TQ?
+```
+
+Notes:
+- `q*` are logical joint angles (deg).
+- `qd*` are logical joint velocities (deg/s).
+- `t_ms` must be strictly increasing.
+- Queue points are validated against firmware joint limits.
+- `TQ` is intended for Cartesian/trajectory execution; manual controls keep using `J`.
+- `TQ?` returns compatibility status (`TQ READY`) and, when supported, extended status (`TQ STAT`).
+- Industrial host flow should treat `TQ` as a transaction: `TQ CLEAR -> TQ PT* -> TQ? (count verify) -> TQ RUN -> TQ?`.
+
+---
+
+### 11) Motion Kernel Diagnostics (`MQ`)
+
+Diagnostics for firmware queue execution timing.
+
+```text
+MQ?
+MQ RESET
+```
+
+Notes:
+- `MQ?` requests the latest diagnostic counters immediately.
+- `MQ RESET` clears counters.
+
+---
+
+## Responses (Robot -> Host)
+
+### Position (`POS`)
+
+```text
 POS <j1> <j2> <j3> <j4> <j5> <j6>
 ```
 
-**Example:**
-```
-POS 0.00 5.00 55.00 129.00 220.00 0.00
-```
+- Sent every 100 ms.
+- Also sent in response to `Q`.
 
-**Update Rate:**
-- Sent automatically every 100ms
-- Also sent immediately in response to `Q` command
+### Endstop (`ENDSTOP`)
 
-**Precision:**
-- 2 decimal places
-
----
-
-### Endstop State (ENDSTOP)
-
-**Format:**
-```
+```text
 ENDSTOP <j1> <j2> <j3> <j4> <j5> <j6>
 ```
 
-**Values:**
-- `0` - Endstop not triggered
-- `1` - Endstop triggered
+- `0` not triggered, `1` triggered.
+- Sent every 100 ms.
 
-**Example:**
+### Configuration (`CFG`)
+
+```text
+CFG {
+  "version": 1,
+  "protocolVersion": 3,
+  "capabilities": {
+    "trajectoryQueue": true,
+    "trajectoryMaxPoints": 256,
+    "trajectoryPointFormat": "hermite_v1",
+    "motionKernelV2": true,
+    "motionKernelDiag": true,
+    "commandAckV1": true,
+    "trajectoryErrorCodesV1": true,
+    "trajectoryStatusV2": true
+  },
+  "joints": [...],
+  "pulseWidthUs": 5,
+  "dirSetupUs": 2,
+  "endstopDebounceMs": 5,
+  "homePose": {
+    "enabled": false,
+    "speedDegS": 10,
+    "applyAfterHAll": true,
+    "jointsDeg": [0,0,0,0,0,0]
+  }
+}
 ```
-ENDSTOP 0 1 0 0 0 0
+
+- `homePose.jointsDeg` is used by UI as the URDF default anchor for `J2..J5`.
+- `capabilities.trajectoryQueue` indicates support for `TQ*` queue commands.
+- `capabilities.motionKernelV2` indicates timer-driven deterministic stepping is active.
+- `capabilities.motionKernelDiag` indicates `MQ STAT` diagnostics are available.
+
+### Trajectory Queue Status (`TQ READY`)
+
+```text
+TQ READY <count>
 ```
-(J2 endstop is currently triggered)
 
-**Update Rate:**
-- Sent automatically every 100ms
+- Sent on `TQ?`, `TQ CLEAR`, and `TQ RUN`.
+- `<count>` is the number of queued points.
 
----
+### Extended Trajectory Queue Status (`TQ STAT`)
 
-### Homing Complete (HOMED)
-
-**Format:**
+```text
+TQ STAT <count> <running> <point_index> <elapsed_ms> <seq>
 ```
+
+- Optional additive status line (capability-gated).
+- `<running>` is `1` while queue execution is active, else `0`.
+- `<seq>` is the current acknowledgement sequence snapshot.
+
+### Trajectory Queue Typed Error (`TQ ERR`)
+
+```text
+TQ ERR <code> [detail]
+```
+
+- Optional additive typed queue error (capability-gated).
+- Firmware still emits compatibility `ERROR TQ ...`.
+
+### Trajectory Queue Progress (`TQ PROG`)
+
+```text
+TQ PROG <point_index> <elapsed_ms>
+```
+
+- Emitted periodically while queue execution is active.
+
+### Trajectory Queue Done (`TQ DONE`)
+
+```text
+TQ DONE
+```
+
+- Emitted when queued trajectory execution finishes.
+
+### Motion Kernel Status (`MQ STAT`)
+
+```text
+MQ STAT <tick_jitter_us> <queue_underrun> <step_overrun>
+```
+
+- Emitted on `MQ?` and periodically while connected.
+- `tick_jitter_us` is the max observed scheduler jitter window.
+- `queue_underrun` increments if queue segment resolution falls behind expected order.
+- `step_overrun` increments when control tick spacing exceeds 2x configured period.
+
+### Home Pose Config (`HP`)
+
+```text
+HP {"enabled":false,"speedDegS":10,"applyAfterHAll":true,"jointsDeg":[0,0,0,0,0,0]}
+```
+
+- Sent in response to `HP?`.
+
+### Homed (`HOMED`)
+
+```text
 HOMED <joint_number>
 ```
 
-**Example:**
+### Home Pose Reached (`HOMEPOSE_REACHED`)
+
+```text
+HOMEPOSE_REACHED
 ```
-HOMED 2
-```
 
-**Notes:**
-- `joint_number` is 1-indexed (1 = J1, 2 = J2, etc.)
-- Sent when a joint successfully completes its homing sequence
+- Sent after successful post-home operational move.
 
----
+### OK / ERROR
 
-### Acknowledgment (OK)
-
-**Format:**
-```
+```text
 OK <message>
-```
-
-**Examples:**
-```
-OK Robot arm ready
-OK Motors enabled
-OK Moving
-OK Emergency stop
-OK All joints homed
-```
-
----
-
-### Error (ERROR)
-
-**Format:**
-```
 ERROR <message>
 ```
 
-**Examples:**
+### Command Ack (`ACK`)
+
+```text
+ACK <seq> <scope> [detail]
 ```
-ERROR Unknown command
-ERROR Invalid move command format
-ERROR No endstop on this joint
-ERROR Endstop not found
-```
+
+- Optional additive acknowledgement (capability-gated) for transactional host handling.
 
 ---
 
-## Message Flow Examples
+## Message Flow Example (H ALL with Operational Home Enabled)
 
-### Example 1: Connect and Move Joint
+Host:
 
-**Host → Robot:**
-```
+```text
 E 1
+H ALL
 ```
 
-**Robot → Host:**
-```
+Robot:
+
+```text
 OK Motors enabled
+HOMED 2
+HOMED 3
+HOMED 4
+HOMED 5
+HOMEPOSE_REACHED
+OK All joints homed
 ```
-
-**Host → Robot:**
-```
-J 15 0 0 0 0 0 20
-```
-
-**Robot → Host:**
-```
-OK Moving
-```
-
-**Robot → Host (periodic updates while moving):**
-```
-POS 3.25 0.00 0.00 0.00 0.00 0.00
-ENDSTOP 0 0 0 0 0 0
-POS 6.50 0.00 0.00 0.00 0.00 0.00
-ENDSTOP 0 0 0 0 0 0
-...
-POS 15.00 0.00 0.00 0.00 0.00 0.00
-ENDSTOP 0 0 0 0 0 0
-```
-
----
-
-## Future Extensions
-
-Potential future commands (not yet implemented):
-
-- `C <x> <y> <z> <rx> <ry> <rz> <speed>` - Move to Cartesian coordinates (requires IK)
-- `P <path_id>` - Execute predefined path
-- `G <gcode>` - Execute G-code command
-- `T <tool_state>` - Control end-effector tool
-
----
-
-## Changelog
-
-**v1.0 (2026-02-09)**
-- Initial protocol specification
-- Implemented: J, H, Q, E, S commands
-- Implemented: POS, ENDSTOP, HOMED, OK, ERROR responses

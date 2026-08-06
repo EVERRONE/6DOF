@@ -9,12 +9,17 @@
 This document describes the kinematics implementation for the 6DOF robot arm, including:
 - Forward Kinematics (FK): Joint angles → Cartesian position
 - Inverse Kinematics (IK): Cartesian position → Joint angles
-- DH parameter derivation from URDF
+- URDF-chain runtime frame model (shared by FK, IK, and 3D viewer)
 - Usage examples and troubleshooting
 
 ---
 
 ## Coordinate Systems
+
+### Runtime Kinematic Frame (Authoritative)
+- Runtime FK/IK uses URDF chain transforms from `ROBOT_KINEMATIC_CHAIN`.
+- The 3D robot, Cartesian target marker, and `currentPosition` all use this same URDF frame.
+- This avoids visual/numeric mismatch between marker position and robot pose.
 
 ### Joint Space
 - **Representation:** 6 joint angles [J1, J2, J3, J4, J5, J6]
@@ -30,9 +35,106 @@ This document describes the kinematics implementation for the 6DOF robot arm, in
   - Y: Left/right
   - Z: Up/down (vertical)
 
+### Logical-to-URDF Angle Mapping
+
+FK/IK/3D do not consume raw logical angles directly; they first apply an effective URDF offset:
+- `J2..J5`: `effectiveUrdfOffsetDeg = -homePose.jointsDeg`
+- `J1/J6`: `effectiveUrdfOffsetDeg = cfg.joints[j].urdfOffsetDeg`
+
+Direction multipliers are also applied:
+- `urdfDir = [1, 1, 1, 1, -1, -1]` (J5/J6 inverted)
+
+Conversions used globally:
+- `urdfDeg = logicalDeg * urdfDir + effectiveUrdfOffsetDeg`
+- `logicalDeg = (urdfDeg - effectiveUrdfOffsetDeg) / urdfDir`
+
+### Why J6 Does Not Affect XYZ
+- With the current tool center point (TCP), J6 rotates around the tool axis.
+- That rotation changes orientation, but not end-effector position in Cartesian XYZ.
+- For position-only IK, J6 is underconstrained and may remain unchanged.
+- For pose-locked IK, J6 is actively used to maintain orientation quality.
+
+### Cartesian Policy
+- Cartesian control exposes two explicit modes:
+  - `pose_lock` (default): hold current tool orientation while moving in XYZ.
+  - `position_only`: prioritize XYZ only and allow orientation drift.
+- Direct Cartesian moves are generated as linear trajectories with quintic minimum-jerk timing.
+- IK is solved sample-by-sample (warm-started), and each sample carries joint velocity for firmware interpolation.
+- Default quality gates:
+  - position residual target: <= 1.5 mm
+  - orientation residual target (pose lock): <= 1.5 deg
+  - straight-line tracking target: <= 2 mm max deviation
+- If the selected mode cannot satisfy quality gates, move is rejected with diagnostics.
+
+### IK Runtime Hierarchy (V3)
+- Runtime solver order:
+  1. Analytical-first branch generation (`AnalyticalPieperIK`)
+  2. Continuity/branch-lock ranking (`ContinuityPolicy`)
+  3. Numerical constrained refinement (`InverseKinematics`)
+  4. Numeric-only fallback when analytical candidates are not valid
+- Branch labels are deterministic:
+  - `SL|SR` = shoulder side
+  - `EU|ED` = elbow branch
+  - `WF|WN` = wrist flip / non-flip
+- Branch locking is enabled by default for trajectory continuity and avoids branch jumps unless needed.
+- Singularity handling includes:
+  - spectrum-based damping scaling
+  - wrist singular bypass near `sin(J5) -> 0`
+  - explicit singularity flags in `IKResult`.
+- Collision handling:
+  - optional capsule-based self-collision checks are available in the IK loop.
+  - when enabled, colliding solutions are rejected with `failureCategory='collision'`.
+- Boundary handling:
+  - reachability probe now returns `boundaryDistanceM`.
+  - damping and step aggressiveness are reduced near workspace limits.
+
+### Quaternion-First Orientation Internals
+- Internal IK error metrics use quaternion log-map error.
+- Orientation drift metrics are quaternion-based (geodesic angle), not Euler subtraction.
+- Euler angles remain supported as UI I/O representation for compatibility.
+
+### Workspace Classification Policy (Strict)
+- A target is not classified as `invalid_target` from a single failed attempt.
+- Runtime retries in stages:
+  - Stage A: base solver parameters
+  - Stage B: relaxed damping/posture parameters
+  - Stage C: nearby seeded retries
+- `invalid_target` is emitted only when all retries fail and the best residual remains above strict threshold.
+- If pose lock fails but position-only succeeds, failure is classified as `orientation_infeasible`.
+
+### Queue-Driven Execution
+- Cartesian trajectories are uploaded using `TQ` queue commands.
+- Firmware executes the queue internally with Hermite interpolation.
+- Manual controls (`J`, `JR`) stay unchanged.
+- Queue budgeting is adaptive: planner first tries the target quality floor (25 Hz), then auto-adjusts speed/sampling to stay within firmware point limits before rejecting.
+- Cartesian planning is two-stage:
+  - Stage 1 (`stage1_fast`): fast endpoint feasibility target (<500 ms responsiveness).
+  - Stage 2 (`stage2_refine`): strict background refinement on a worker thread.
+- Execution only starts after Stage 2 returns a strict-quality trajectory.
+- Runtime uses a normalized constraint contract per request:
+  - source limits come from firmware config (logical frame)
+  - limits are mapped once into URDF frame (including direction/offset mapping)
+  - endpoint IK, interpolation IK, and worker refinement all consume the same URDF-frame limits.
+- Planned trajectories are fail-closed on limits:
+  - no silent post-plan clamping before queue upload
+  - any out-of-limit sample is rejected as deterministic planning failure (`joint_limit`).
+- Queue execution is transactional:
+  - clear -> upload -> verify queue count -> run -> status query.
+- Motion quality diagnostics are exposed by `MQ STAT` (`tick_jitter_us`, `queue_underrun`, `step_overrun`).
+- Operator feature flags:
+  - `REACT_APP_IK_ENGINE_V2` (default enabled)
+  - `REACT_APP_REACHABILITY_ATLAS_V1` (default enabled)
+  - `REACT_APP_MOTION_KERNEL_V2` (default enabled)
+  - `REACT_APP_IK_ANALYTIC_PRIMARY_V1` (default enabled)
+  - `REACT_APP_IK_RESOLVED_RATE_V1` (default enabled)
+  - `REACT_APP_IK_COLLISION_CHECK_V1` (default disabled; set `1` to enable)
+
 ---
 
-## DH Parameters
+## Legacy DH Parameters (Reference Only)
+
+The table below is historical reference from earlier implementation work.
+Runtime FK/IK now uses the URDF chain directly.
 
 The robot uses **Modified DH Convention (Craig)**:
 
@@ -57,24 +159,19 @@ The robot uses **Modified DH Convention (Craig)**:
 
 ### Algorithm
 
-1. Convert joint angles from degrees to radians
-2. Create DH transformation matrix for each joint:
-   ```
-   T_i = Rot_X(α) · Trans_X(a) · Rot_Z(θ) · Trans_Z(d)
-   ```
-3. Multiply matrices: `T = T₁ · T₂ · T₃ · T₄ · T₅ · T₆`
-4. Extract position from translation vector: `[T₁₄, T₂₄, T₃₄]`
-5. Extract orientation from rotation matrix: `[T₁₁..T₃₃]`
+1. Convert joint angles from degrees to radians.
+2. For each URDF joint, build:
+   - origin transform from `xyz` and `rpy`
+   - revolute transform around the joint axis (`axis` from URDF)
+3. Multiply along the chain:
+   - `T_base_to_ee = (T_origin_1 * R_axis_1(q1)) * ... * (T_origin_6 * R_axis_6(q6))`
+4. Extract position from translation (`x, y, z`).
+5. Extract orientation from the final rotation matrix.
 
-### Transformation Matrix
+### Per-Joint Composition
 
-```
-      ┌                                          ┐
-      │  cos(θ)    -sin(θ)      0           a    │
-T_i = │  sin(θ)cos(α)  cos(θ)cos(α)  -sin(α)  -d·sin(α) │
-      │  sin(θ)sin(α)  cos(θ)sin(α)   cos(α)   d·cos(α) │
-      │     0          0          0           1    │
-      └                                          ┘
+```text
+T_joint_i = T_xyz(x_i, y_i, z_i) * R_rpy(roll_i, pitch_i, yaw_i) * R_axis_i(q_i)
 ```
 
 ### Code Example
@@ -107,28 +204,29 @@ if (result.success) {
 
 ## Inverse Kinematics
 
-### Algorithm: Damped Least Squares (DLS)
+### Algorithm: Weighted Damped Least Squares (Normalized)
 
-Iterative numerical method that solves:
+Iterative solver in URDF chain frame:
 
-```
-Δq = (J^T·J + λ²I)^(-1) · J^T · e
-```
+`
+Delta q = (J^T J + (lambda^2 * s + w_posture * s) I)^(-1) * (J^T e + w_posture * s * (q_center - q))
+`
 
 Where:
-- `J` = Jacobian matrix (∂FK/∂q)
-- `e` = Position/pose error
-- `λ` = Damping factor (singularity avoidance)
-- `Δq` = Joint angle update
+- J = analytic geometric Jacobian (units per degree)
+- e = 6D pose error (position + orientation)
+- lambda = damping weight
+- w_posture = posture regularization weight
+- s = normalization scale, s = max(trace(J^T J) / n, eps)
 
 **Iteration Steps:**
-1. Compute FK with current joint angles
-2. Calculate error: `e = target - current`
-3. Compute Jacobian numerically
-4. Solve for `Δq` using damped pseudo-inverse
-5. Update: `q ← q + Δq`
-6. Check convergence or max iterations
-7. Repeat from step 1
+1. Compute FK at current joint angles.
+2. Compute weighted pose error.
+3. Build analytic Jacobian from URDF chain.
+4. Solve normalized DLS update.
+5. Clamp per-iteration step and joint limits.
+6. Accept/reject step with line search and adaptive damping.
+7. Repeat until strict residual gates are met or retries are exhausted.
 
 ### Configuration
 
@@ -189,10 +287,10 @@ if (result.success) {
 
 ### Performance
 
-- **Average iterations:** 15-30
-- **Computation time:** 50-200ms
-- **Success rate:** ~90% within workspace
-- **Convergence tolerance:** 1mm
+- **Position residual target:** <= 1.5 mm
+- **Pose-lock orientation target:** <= 1.5 deg
+- **Classification policy:** staged retries before `invalid_target`
+- **Cartesian execution:** queue-budgeted sampling with strict final residual gate
 
 ---
 
@@ -257,8 +355,9 @@ The test suite includes:
 1. Move robot to known position (e.g., home)
 2. Read XYZ from StatusBar
 3. Enter same XYZ in Cartesian control
-4. Click "Move to Position"
-5. Robot should stay in same position (minimal movement)
+4. Click `Current -> Target` and verify marker overlaps end-effector in 3D
+5. Click "Move to Position"
+6. Robot should stay in same position (minimal movement)
 
 ---
 
@@ -293,13 +392,22 @@ Located in left panel above joint controls:
 - Workspace limit indicators
 - "Move to Position" button (triggers IK)
 - IK status feedback (success/failure, iterations, error)
+- Target marker is frame-gated by loaded firmware config and snaps to current pose after motion settles.
+
+**Preconditions (required):**
+- Connected to robot
+- Motors enabled
+- J2..J5 homed
 
 **Workflow:**
-1. Enter target X, Y, Z coordinates (mm)
-2. Click "Move to Position"
-3. IK solver computes joint angles
-4. If successful, robot moves to target
-5. If failed, error message displayed
+1. Connect to robot and enable motors
+2. Home J2..J5 (use `H ALL` for normal flow)
+3. Wait until Cartesian frame is synchronized (or click `Current -> Target`)
+4. Enter target X, Y, Z coordinates (mm)
+5. Click "Move to Position"
+6. IK solver computes joint angles
+7. If successful, robot moves to target
+8. If failed, error message displayed
 
 ---
 
@@ -334,11 +442,13 @@ Y ←───┘       └───→ X
 **Problem:** "Failed to converge" error
 
 **Solutions:**
-1. Check if target is within workspace bounds
-2. Use better initial guess (current position)
-3. Increase `maxIterations` to 200
-4. Increase `dampingFactor` to 0.05 (more stable)
-5. Relax `tolerance` to 0.002 (2mm)
+1. Verify frame consistency first (`Current -> Target` overlap in 3D).
+2. Retry in `Position Only` mode:
+   - if it succeeds, failure is orientation constraint (`orientation_infeasible`).
+3. Check failure category:
+   - `joint_limit` or `singularity`: move slightly away and retry.
+   - `invalid_target`: all staged retries failed above strict residual gate.
+4. If queue budget error appears, move closer or reduce Cartesian speed.
 
 ### IK Converges to Wrong Solution
 
@@ -356,12 +466,12 @@ Y ←───┘       └───→ X
 **Problem:** FK position doesn't match real robot
 
 **Causes:**
-- DH parameters incorrect
+- URDF chain constants or mapping incorrect
 - Stepper calibration wrong (`USTEPS_PER_DEG`)
 - Mechanical play in joints
 
 **Solutions:**
-1. Verify DH parameters match URDF
+1. Verify URDF chain constants and logical-to-URDF mapping
 2. Re-calibrate stepper ratios in `config.h`
 3. Re-home robot to reset zero positions
 4. Check for mechanical issues
@@ -484,3 +594,4 @@ link5 (end-effector)
 - [PHASE_2_COMPLETE.md](../PHASE_2_COMPLETE.md) - Implementation details
 - [URDF.md](../URDF.md) - Robot structure definition
 - [testKinematics.ts](../robot-arm-control/src/kinematics/testKinematics.ts) - Validation tests
+

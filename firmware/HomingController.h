@@ -18,11 +18,15 @@ public:
 
 private:
   StepperController& stepper_;
+  bool lastRawState_[6];
+  bool debouncedState_[6];
+  unsigned long lastChangeMs_[6];
 
   bool findEndstop(int jointIndex);
   void backOff(int jointIndex);
   void fineApproach(int jointIndex);
   void checkSerialForStop();
+  void updateEndstopDebounce(int jointIndex);
 };
 
 #endif

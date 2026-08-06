@@ -1,5 +1,5 @@
 // URDF Parser for extracting kinematic chain information
-import { URDFJoint, Vector3, Rotation3 } from './types';
+import { URDFJoint } from './types';
 
 /**
  * Parses URDF XML string and extracts joint information
@@ -84,17 +84,18 @@ export class URDFParser {
     let currentLink = rootLink;
 
     // Build chain by following parent-child relationships
-    let foundNext = true;
-    while (foundNext) {
-      foundNext = false;
-
-      this.joints.forEach((joint) => {
-        if (!foundNext && joint.parent === currentLink) {
+    // using deterministic map iteration to avoid closure capture pitfalls.
+    while (true) {
+      let foundNext = false;
+      for (const joint of Array.from(this.joints.values())) {
+        if (joint.parent === currentLink) {
           chain.push(joint);
           currentLink = joint.child;
           foundNext = true;
+          break;
         }
-      });
+      }
+      if (!foundNext) break;
     }
 
     return chain;

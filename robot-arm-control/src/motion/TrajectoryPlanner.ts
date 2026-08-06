@@ -2,6 +2,7 @@
 // Plans and coordinates multi-segment trajectories through a series of waypoints
 
 import {
+  CartesianInterpolationResult,
   Waypoint,
   Trajectory,
   TrajectorySegment,
@@ -11,7 +12,8 @@ import {
 } from './types';
 import { PathInterpolator } from './PathInterpolator';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
-import { Vector3 } from '../kinematics/types';
+import { IKEngineMode, IKSolveOptions, Rotation3, Vector3 } from '../kinematics/types';
+import { logicalToUrdfAngles } from '../kinematics/angleMapping';
 
 /**
  * Default planner configuration
@@ -38,10 +40,14 @@ export const DEFAULT_PLANNER_CONFIG: PathPlannerConfig = {
 export class TrajectoryPlanner {
   private interpolator: PathInterpolator;
   private config: PathPlannerConfig;
+  private urdfOffsetsDeg: number[];
 
-  constructor(config?: Partial<PathPlannerConfig>) {
+  constructor(config?: Partial<PathPlannerConfig>, urdfOffsetsDeg?: number[]) {
     this.config = { ...DEFAULT_PLANNER_CONFIG, ...config };
-    this.interpolator = new PathInterpolator();
+    this.urdfOffsetsDeg = urdfOffsetsDeg && urdfOffsetsDeg.length === 6
+      ? [...urdfOffsetsDeg]
+      : [0, 0, 0, 0, 0, 0];
+    this.interpolator = new PathInterpolator(this.urdfOffsetsDeg);
   }
 
   /**
@@ -89,13 +95,23 @@ export class TrajectoryPlanner {
 
       if (this.config.interpolationMode === 'linear') {
         // Cartesian straight-line interpolation
-        segment = this.interpolator.interpolateCartesianSpace(
+        const interpolation = this.interpolator.interpolateCartesianSpace(
           segStartAngles,
           waypoint.position,
           speed,
           this.config.defaultAcceleration,
-          this.config.pointsPerSecond
+          this.config.pointsPerSecond,
+          waypoint.orientation,
+          undefined,
+          'hybrid_constrained_v2'
         );
+        if (!interpolation.success) {
+          console.warn(
+            `Failed Cartesian interpolation for waypoint ${waypoint.label || waypoint.id}: ${interpolation.error}`
+          );
+          continue;
+        }
+        segment = interpolation.segment;
       } else {
         // Joint space interpolation
         segment = this.interpolator.interpolateJointSpace(
@@ -120,7 +136,7 @@ export class TrajectoryPlanner {
 
       segments.push(segment);
       timeOffset += segment.duration;
-      segStartAngles = endAngles;
+      segStartAngles = segment.points[segment.points.length - 1]?.jointAngles || endAngles;
     }
 
     // Compute totals
@@ -163,15 +179,18 @@ export class TrajectoryPlanner {
   /**
    * Get the Cartesian positions along the trajectory for 3D visualization
    */
-  static getTrajectoryPositions(trajectory: Trajectory): Vector3[] {
+  static getTrajectoryPositions(trajectory: Trajectory, urdfOffsetsDeg?: number[]): Vector3[] {
     const positions: Vector3[] = [];
     const allPoints = TrajectoryPlanner.flattenTrajectory(trajectory);
+    const offsets = urdfOffsetsDeg && urdfOffsetsDeg.length === 6
+      ? urdfOffsetsDeg
+      : [0, 0, 0, 0, 0, 0];
 
     // Sample every Nth point for performance
     const step = Math.max(1, Math.floor(allPoints.length / 200));
 
     for (let i = 0; i < allPoints.length; i += step) {
-      const fk = ForwardKinematics.solve(allPoints[i].jointAngles);
+      const fk = ForwardKinematics.solve(logicalToUrdfAngles(allPoints[i].jointAngles, offsets));
       if (fk.success) {
         positions.push({ ...fk.endEffectorPose.position });
       }
@@ -179,7 +198,9 @@ export class TrajectoryPlanner {
 
     // Always include last point
     if (allPoints.length > 0) {
-      const lastFK = ForwardKinematics.solve(allPoints[allPoints.length - 1].jointAngles);
+      const lastFK = ForwardKinematics.solve(
+        logicalToUrdfAngles(allPoints[allPoints.length - 1].jointAngles, offsets)
+      );
       if (lastFK.success) {
         positions.push({ ...lastFK.endEffectorPose.position });
       }
@@ -193,6 +214,50 @@ export class TrajectoryPlanner {
    */
   updateConfig(config: Partial<PathPlannerConfig>): void {
     this.config = { ...this.config, ...config };
+  }
+
+  setUrdfOffsets(urdfOffsetsDeg: number[]): void {
+    this.urdfOffsetsDeg = urdfOffsetsDeg && urdfOffsetsDeg.length === 6
+      ? [...urdfOffsetsDeg]
+      : [0, 0, 0, 0, 0, 0];
+    this.interpolator.setUrdfOffsets(this.urdfOffsetsDeg);
+  }
+
+  setJointLimitsDeg(minDeg: number[], maxDeg: number[]): void {
+    this.interpolator.setJointLimitsDeg(minDeg, maxDeg);
+  }
+
+  planPoseLockedCartesianMove(
+    startAngles: number[],
+    targetPosition: Vector3,
+    targetOrientation?: Rotation3,
+    options?: {
+      speedMmS?: number;
+      accelerationMmS2?: number;
+      pointsPerSecond?: number;
+      ikOptions?: Partial<IKSolveOptions>;
+      ikEngineMode?: IKEngineMode;
+      strictFinalGate?: boolean;
+      deadlineMs?: number;
+    }
+  ): CartesianInterpolationResult {
+    const speed = options?.speedMmS ?? 25;
+    const acceleration = options?.accelerationMmS2 ?? 80;
+    const pointsPerSecond = options?.pointsPerSecond ?? 40;
+    const ikEngineMode = options?.ikEngineMode ?? 'hybrid_constrained_v2';
+
+    return this.interpolator.interpolateCartesianSpace(
+      startAngles,
+      targetPosition,
+      speed,
+      acceleration,
+      pointsPerSecond,
+      targetOrientation,
+      options?.ikOptions,
+      ikEngineMode,
+      options?.strictFinalGate ?? true,
+      options?.deadlineMs
+    );
   }
 
   /**
@@ -217,7 +282,8 @@ export class TrajectoryPlanner {
       waypoints,
       config,
       createdAt: new Date().toISOString(),
-      version: '1.0'
+      version: '1.0',
+      kinematicsFrame: 'urdf_chain_v1'
     };
   }
 
@@ -227,11 +293,19 @@ export class TrajectoryPlanner {
   static validateSavedPath(data: unknown): data is SavedPath {
     if (!data || typeof data !== 'object') return false;
     const obj = data as Record<string, unknown>;
+    const frame = obj.kinematicsFrame;
+    const frameValid = (
+      frame === undefined ||
+      frame === 'urdf_chain_v1' ||
+      frame === 'legacy_dh_v1'
+    );
+
     return (
       typeof obj.name === 'string' &&
       Array.isArray(obj.waypoints) &&
       obj.waypoints.length > 0 &&
-      typeof obj.version === 'string'
+      typeof obj.version === 'string' &&
+      frameValid
     );
   }
 
