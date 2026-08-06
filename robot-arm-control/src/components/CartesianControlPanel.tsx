@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { Vector3 } from '../kinematics/types';
 import { computeWorkspaceBounds } from '../kinematics/InverseKinematics';
@@ -40,14 +40,34 @@ export const CartesianControlPanel: React.FC = () => {
     };
   }, []);
 
-  // Update input fields when current position changes
+  const isConnected = connectionStatus === 'connected';
+
+  /**
+   * Seed the target fields from the arm once per connection, then leave them
+   * alone.
+   *
+   * These used to follow currentPosition, which the store rebuilds on every
+   * POS report - a new object twenty times a second, so the effect fired even
+   * with the arm standing still and identical numbers. Every keystroke was
+   * overwritten before the next one landed, and the fields could not be typed
+   * into at all.
+   *
+   * Re-syncing on purpose is what the "Set current as target" button is for.
+   */
+  const seededRef = useRef(false);
+
   useEffect(() => {
-    if (currentPosition) {
-      setInputX((currentPosition.x * 1000).toFixed(1)); // Convert to mm
-      setInputY((currentPosition.y * 1000).toFixed(1));
-      setInputZ((currentPosition.z * 1000).toFixed(1));
+    if (!isConnected) {
+      seededRef.current = false; // a reconnect re-seeds from the arm
+      return;
     }
-  }, [currentPosition]);
+    if (seededRef.current || !currentPosition) return;
+
+    setInputX((currentPosition.x * 1000).toFixed(1)); // metres to mm
+    setInputY((currentPosition.y * 1000).toFixed(1));
+    setInputZ((currentPosition.z * 1000).toFixed(1));
+    seededRef.current = true;
+  }, [isConnected, currentPosition]);
 
   const handleMoveToPosition = async () => {
     const x = parseFloat(inputX) / 1000; // Convert mm to m
@@ -94,8 +114,6 @@ export const CartesianControlPanel: React.FC = () => {
       setInputZ((currentPosition.z * 1000).toFixed(1));
     }
   };
-
-  const isConnected = connectionStatus === 'connected';
 
   // Same gate as running a path: a Cartesian target becomes absolute joint
   // angles, so an untrusted datum makes it mean something else entirely.
@@ -236,7 +254,8 @@ export const CartesianControlPanel: React.FC = () => {
       <div className="flex gap-2">
         <button
           onClick={handleMoveToPosition}
-          disabled={!isConnected || !motorsEnabled}
+          disabled={blockedReason !== null || !motorsEnabled}
+          title={blockedReason ?? 'Solve IK and move there'}
           className="flex-1 bg-blue-600 text-white px-4 py-2 rounded font-semibold hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
         >
           Move to Position

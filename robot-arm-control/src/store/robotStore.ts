@@ -349,7 +349,17 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       motorsEnabled: false,
       robotState: RobotState.IDLE,
       executionState: ExecutionState.IDLE,
-      executionProgress: { ...initialProgress }
+      executionProgress: { ...initialProgress },
+      // Where the tool is stops being known the moment the link drops: the arm
+      // can be moved by hand or power-cycled while we are not looking. Keeping
+      // the last reading would leave the Cartesian panel quoting a position
+      // nobody can vouch for, and the tool lock holding an orientation captured
+      // from it.
+      currentPosition: null,
+      currentRotation: null,
+      targetPosition: null,
+      toolLocked: false,
+      lockedRotation: null
     });
   },
 
