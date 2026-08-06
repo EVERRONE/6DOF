@@ -97,8 +97,27 @@ const bool INVERT_DIR[NUM_AXES] = {false, false, true, true, true, false};
 //
 // !! J6's URDF entry reads lower="0" upper="0", the placeholder a continuous
 // !! joint gets, so it carries no information. Left at a full turn either way.
+//
+// Confirmed on the arm by approaching each limit from the inside, and three of
+// them moved:
+//
+//   J3  158 -> 104   the design range is not reachable: the arm hits ITSELF at
+//                    about 107 degrees, well before anything mechanical stops
+//                    the joint. See the note below - this one is different in
+//                    kind from the others.
+//   J4  305 -> 332   more travel than the URDF claimed
+//   J5  271 -> 222   less
+//
+// J1 and J2 have not been checked against the arm yet.
+//
+// !! J3's limit is a SELF-COLLISION limit, not a mechanical one, and a single
+// !! number is a poor way to hold it. Where the arm fouls depends on where J2
+// !! and the wrist are, so 104 is conservative in some poses and cannot be
+// !! trusted to be conservative in all of them. It is a stand-in until the
+// !! planner checks collisions properly; until then, treat J3 near its limit
+// !! with more suspicion than the other axes.
 const float JOINT_MIN[NUM_AXES] = {-90,   2,   2,   2,   2, -360};
-const float JOINT_MAX[NUM_AXES] = { 90,  86, 158, 305, 271,  360};
+const float JOINT_MAX[NUM_AXES] = { 90,  86, 104, 332, 222,  360};
 
 // ---------------------------------------------------------------------------
 // Calibration
@@ -284,9 +303,9 @@ const float BACKOFF_MAX_DISTANCE = 15.0f;  // degrees
 const float HOMING_MAX_TRAVEL[NUM_AXES] = {
   190.0f,  // J1  range 180 deg (no endstop)
   95.0f,   // J2  range  84 deg
-  170.0f,  // J3  range 156 deg
-  315.0f,  // J4  range 303 deg
-  280.0f,  // J5  range 269 deg
+  115.0f,  // J3  range 102 deg
+  340.0f,  // J4  range 330 deg
+  230.0f,  // J5  range 220 deg
   730.0f   // J6  range 720 deg (no endstop)
 };
 

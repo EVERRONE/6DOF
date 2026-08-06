@@ -89,7 +89,7 @@ export const ROBOT_JOINTS: JointSpec[] = [
       xyz: { x: 0.00027, y: -0.16, z: 0.016 },
       rpy: { roll: -3.14159, pitch: 0.0, yaw: 0.0 }
     },
-    limitDeg: { min: 2, max: 158 }
+    limitDeg: { min: 2, max: 104 }
   },
   {
     name: 'link3_joint',
@@ -101,7 +101,7 @@ export const ROBOT_JOINTS: JointSpec[] = [
       xyz: { x: -0.035, y: 0.0151, z: 0.0364 },
       rpy: { roll: -1.5708, pitch: 0.0, yaw: 1.5708 }
     },
-    limitDeg: { min: 2, max: 305 }
+    limitDeg: { min: 2, max: 332 }
   },
   {
     name: 'Joint5',
@@ -113,7 +113,7 @@ export const ROBOT_JOINTS: JointSpec[] = [
       xyz: { x: 0.0, y: -0.01002, z: 0.10323 },
       rpy: { roll: -1.5708, pitch: 1.5708, yaw: 0.0 }
     },
-    limitDeg: { min: 2, max: 271 }
+    limitDeg: { min: 2, max: 222 }
   },
   {
     name: 'Joint6',

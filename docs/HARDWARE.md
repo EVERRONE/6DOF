@@ -89,14 +89,26 @@ cannot be homed automatically.
 
 ## Travel limits
 
-| Joint | Min | Max | Range | URDF allows |
-|-------|-----|-----|-------|-------------|
-| J1 | −90° | +90° | 180° | ±160° — held back for cables |
-| J2 | +2° | +86° | 84° | 89.5° |
-| J3 | +2° | +158° | 156° | 161.4° |
-| J4 | +2° | +305° | 303° | 308.2° |
-| J5 | +2° | +271° | 269° | 274.2° |
-| J6 | −360° | +360° | 720° | placeholder, no data |
+| Joint | Min | Max | Range | URDF | Confirmed on the arm |
+|-------|-----|-----|-------|------|----------------------|
+| J1 | −90° | +90° | 180° | ±160° | not yet — held back for cables |
+| J2 | +2° | +86° | 84° | 89.5° | not yet |
+| J3 | +2° | **+104°** | 102° | 161.4° | **self-collision at ~107°** |
+| J4 | +2° | **+332°** | 330° | 308.2° | yes — more than the design claimed |
+| J5 | +2° | **+222°** | 220° | 274.2° | yes — less |
+| J6 | −360° | +360° | 720° | placeholder | n/a |
+
+Three were checked by approaching from the inside and moved. J4 has more travel
+than the design claimed and J5 has less, which is the ordinary outcome of a
+built machine differing from its drawing.
+
+**J3 is different in kind.** It does not reach a mechanical stop: the arm hits
+*itself* at about 107°, well inside the design range. A single joint limit is a
+poor way to hold that, because where the arm fouls depends on where J2 and the
+wrist are — 104° is conservative in some poses and cannot be trusted to be
+conservative in all of them. It stands in until the planner checks collisions
+properly, and until then J3 near its limit deserves more suspicion than the
+other axes.
 
 These come from the mechanical design in [URDF.md](../URDF.md), mapped into
 firmware angles through `urdf = URDF_DIRECTION × (logical − POST_HOME_ANGLES)`,
@@ -128,11 +140,11 @@ The reachable workspace that follows, at 13 samples per joint:
 
 | Axis | Min | Max |
 |------|-----|-----|
-| X | −338 mm | +43 mm |
-| Y | −338 mm | +338 mm |
-| Z | +22 mm | +434 mm |
+| X | −341 mm | +27 mm |
+| Y | −341 mm | +341 mm |
+| Z | +23 mm | +437 mm |
 
-106,169 cm³, against 38,816 cm³ under the notes' limits and 16,605 cm³ before the
+103,693 cm³, against 38,816 cm³ under the notes' limits and 16,605 cm³ before the
 URDF mapping was applied to the kinematics at all.
 
 That is the axis-aligned outer bound, not the reachable set — a point inside the
