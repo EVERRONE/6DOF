@@ -76,11 +76,19 @@ describe('workspace boundary', () => {
     expect(size.z).toBeCloseTo(b.max.z - b.min.z, 6);
   });
 
-  it('sits where the arm actually works, off to one side of the base', () => {
+  it('is not the constant it used to be', () => {
+    // The regression this guards: a fixed 600 x 600 x 400 mm box centred on the
+    // origin. It has to differ from that in some dimension, whatever the joint
+    // limits currently are.
     const b = workspaceBounds(9);
-    // The whole reachable set is on one side in X: a box centred on the origin
-    // would put most of it outside.
-    expect(b.max.x).toBeLessThan(0);
+    const wasHardcoded =
+      Math.abs(b.min.x + 0.3) < 1e-9 && Math.abs(b.max.x - 0.3) < 1e-9 &&
+      Math.abs(b.min.y + 0.3) < 1e-9 && Math.abs(b.max.y - 0.3) < 1e-9 &&
+      Math.abs(b.min.z) < 1e-9 && Math.abs(b.max.z - 0.4) < 1e-9;
+    expect(wasHardcoded).toBe(false);
+
+    // The base sits at z = 0.08 and the arm reaches up, so the floor of the
+    // reachable set cannot be at or below the ground plane.
     expect(b.min.z).toBeGreaterThan(0);
   });
 

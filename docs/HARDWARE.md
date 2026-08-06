@@ -89,28 +89,40 @@ cannot be homed automatically.
 
 ## Travel limits
 
-| Joint | Min | Max | Range |
-|-------|-----|-----|-------|
-| J1 | −40° | +30° | 70° |
-| J2 | 0° | +60° | 60° |
-| J3 | 0° | +70° | 70° |
-| J4 | 0° | +274° | 274° |
-| J5 | 0° | **+165°** | 165° |
-| J6 | −360° | +360° | 720° |
+| Joint | Min | Max | Range | URDF allows |
+|-------|-----|-----|-------|-------------|
+| J1 | −90° | +90° | 180° | ±160° — held back for cables |
+| J2 | +2° | +86° | 84° | 89.5° |
+| J3 | +2° | +158° | 156° | 161.4° |
+| J4 | +2° | +305° | 303° | 308.2° |
+| J5 | +2° | +271° | 269° | 274.2° |
+| J6 | −360° | +360° | 720° | placeholder, no data |
+
+These come from the mechanical design in [URDF.md](../URDF.md), mapped into
+firmware angles through `urdf = URDF_DIRECTION × (logical − POST_HOME_ANGLES)`,
+with three degrees taken off each upper bound and the lower bound set two
+degrees off the endstop. A software limit belongs inside the mechanical stop:
+reaching a software limit should be ordinary, reaching a stop a fault.
+
+The previous values came from the project notes — the same source this bring-up
+caught being wrong about direction on four of six axes and homing direction on
+three of four. J2 was limited to 60° where the design allows 89.5°.
 
 These are `JOINT_MIN` / `JOINT_MAX` in `firmware/config.h`, **mirrored** in the
 web app at `robot-arm-control/src/kinematics/robotModel.ts`. A test there asserts
 the exact values, so the two cannot drift apart silently. Change both together.
 
-The limits were recorded in the same scale as the old, wrong step scaling, so
-correcting the calibration moved where each number sits physically — the hard
-stop does not move, the number describing it does. The honest conversion is
-`limit × scale`, which narrows J5 from 280° to 165° and would widen J3 to 77.8°
-and J4 to 353°. J5 is narrowed; J3 and J4 keep their old, tighter figures,
-because it is not known whether those came from measurement or from the same
-notes as the wrong ratios, and a limit that is too tight only costs travel while
-one that is too generous drives into the stop. Open J3 and J4 up once their real
-travel has been measured.
+Superseded by the design values above. The interim step of rescaling the old
+limits by the calibration factors — which narrowed J5 to 165° — was working from
+the project notes, and the URDF puts J5 at 274°, close to the 280° the notes
+carried. That suggests the notes' figure was in true degrees after all and the
+rescale was wrong; taking the limits from the design settles it either way.
+
+**Verify from the inside, never by probing.** Jog to a limit and check clearance
+remains. A joint that reaches its limit with room to spare has a conservative
+limit; one that fouls first means the URDF is optimistic and it wants tightening.
+Driving into a hard stop to find it is how an open-loop arm loses steps silently,
+which is the failure this bring-up started with.
 
 The reachable workspace that follows from these limits is small and strongly
 off-centre, because J1 travels only 70° and J2 only 60°:

@@ -119,8 +119,8 @@ describe('robot model', () => {
     // These must stay in step with firmware/config.h JOINT_MIN / JOINT_MAX.
     // If the solver works in a different box, the firmware clamps the solution
     // and the arm goes somewhere the solver never asked for.
-    expect(JOINT_LIMITS_DEG.min).toEqual([-40, 0, 0, 0, 0, -360]);
-    expect(JOINT_LIMITS_DEG.max).toEqual([30, 60, 70, 274, 165, 360]);
+    expect(JOINT_LIMITS_DEG.min).toEqual([-90, 2, 2, 2, 2, -360]);
+    expect(JOINT_LIMITS_DEG.max).toEqual([90, 86, 158, 305, 271, 360]);
   });
 
   it('places the documented home pose inside the limits', () => {

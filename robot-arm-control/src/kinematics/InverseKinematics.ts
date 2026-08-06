@@ -62,7 +62,13 @@ export const DEFAULT_IK_OPTIONS: IKOptions = {
   orientationTolerance: 0.0087, // 0.5 deg
   orientationScale: 0.05,
   maxStepRad: 0.35, // ~20 deg
-  maxSeeds: 6
+  // Raised from 6 when the joint limits were widened to the design values. The
+  // reachable set roughly trebled, so more targets sit in configurations the
+  // near seeds do not lead to, and the success rate on reachable targets fell
+  // below 99%. Ten restores 100% on 400 random reachable targets and is no
+  // slower overall: the extra seeds are cheap, and they spare the exhaustive
+  // retries that a near miss costs.
+  maxSeeds: 10
 };
 
 /** Relative damping bounds for the Levenberg-Marquardt loop. */

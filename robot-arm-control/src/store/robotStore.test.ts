@@ -16,7 +16,7 @@ import { ExecutionState, Waypoint } from '../motion/types';
 import { TrajectoryPlanner } from '../motion/TrajectoryPlanner';
 import { rotationLog, multiply3, transpose3 } from '../kinematics/linalg';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
-import { HOME_POSE_DEG } from '../kinematics/robotModel';
+import { JOINT_LIMITS_DEG, HOME_POSE_DEG } from '../kinematics/robotModel';
 import { FakePort, FakeSerial, commandsOfType } from '../testUtils/fakeSerial';
 
 const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -426,11 +426,13 @@ describe('store: bench controls', () => {
     port.push('POS 0.00 5.00 55.00 129.00 220.00 0.00\n');
     await flush();
 
-    // J2 stops at 60.
+    // Read the limit rather than repeating it: this is a test of clamping, and
+    // hardcoding the number turns it into a test of one particular limit table.
+    const j2Max = JOINT_LIMITS_DEG.max[1];
     await useRobotStore.getState().jogJoint('J2', 500);
     await flush();
 
-    expect(useRobotStore.getState().targetAngles.J2).toBe(60);
+    expect(useRobotStore.getState().targetAngles.J2).toBe(j2Max);
     expect(
       useRobotStore.getState().events.some(e => /clamped/i.test(e.text))
     ).toBe(true);

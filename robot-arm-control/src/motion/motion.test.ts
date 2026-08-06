@@ -388,7 +388,9 @@ describe('trajectory planner', () => {
     const planner = new TrajectoryPlanner({ interpolationMode: 'joint' });
     const waypoints = [
       makeWaypoint([...JOINT_LIMITS_DEG.max.slice(0, 5), 0], 'extreme'),
-      makeWaypoint([30, 0, 0, 0, 0, 0], 'other end')
+      // The opposite corner, also read from the table. Hardcoded zeros fell
+      // below the minimum once the limits came off the endstop with margin.
+      makeWaypoint([...JOINT_LIMITS_DEG.min.slice(0, 5), 0], 'other end')
     ];
 
     const trajectory = planner.planTrajectory(waypoints, [...HOME_POSE_DEG]);

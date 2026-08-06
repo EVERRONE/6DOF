@@ -546,11 +546,24 @@ static void testStreamingStaysContinuous() {
   stepper.begin();
   stepper.enable();
 
+  // Park every axis but J2 inside its own limits, and hold it there in each
+  // queued point. A target outside a limit is clamped, so an axis meant to
+  // stand still at zero gets dragged to its minimum on the first move, and the
+  // sequence stops being collinear - the junction planner then correctly slows
+  // for a direction change this test did not intend to create.
+  JointAngles held;
+  for (int i = 0; i < NUM_AXES; i++) {
+    if (i == 1) continue;
+    held[i] = JOINT_MIN[i];
+    stepper.setJointAngle(i, JOINT_MIN[i]);
+  }
+
   // 20 collinear points, 2 degrees of J2 apart - the shape a planned trajectory
   // arrives in. The old firmware held a single target and restarted a
   // constant-rate move on each one, giving a full stop per point.
   for (int k = 1; k <= 20; k++) {
-    JointAngles p = makeAngles(0, 2.0f * k, 0, 0, 0, 0);
+    JointAngles p = held;
+    p[1] = JOINT_MIN[1] + 2.0f * k;
     CHECK(stepper.queueMove(p, 40.0f));
   }
 
@@ -586,7 +599,7 @@ static void testStreamingStaysContinuous() {
   pass("speed is carried through all 19 junctions without a single stop");
 
   const JointAngles reached = stepper.currentAngles();
-  CHECK_NEAR(reached[1], 40.0f, 1.0f / USTEPS_PER_DEG[1]);
+  CHECK_NEAR(reached[1], JOINT_MIN[1] + 40.0f, 1.0f / USTEPS_PER_DEG[1]);
   pass("the streamed sequence still lands exactly on the final point");
 }
 

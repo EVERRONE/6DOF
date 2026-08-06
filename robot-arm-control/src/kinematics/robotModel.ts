@@ -1,8 +1,9 @@
 // Robot model definition - the single source of truth for kinematics.
 //
-// The kinematic chain is taken verbatim from URDF.md. The joint limits are
-// taken from firmware/config.h (JOINT_MIN / JOINT_MAX), because those are the
-// mechanically valid hard stops that the firmware itself enforces. Keeping the
+// The kinematic chain is taken verbatim from URDF.md, and so are the joint
+// limits: they come from the mechanical design, mapped into firmware angles and
+// set inside the stops with margin. They mirror JOINT_MIN / JOINT_MAX in
+// firmware/config.h, which is what the firmware itself enforces. Keeping the
 // limits in one place matters: if the solver works in a different box than the
 // firmware, the firmware silently clamps the solution and the arm ends up
 // somewhere the solver never asked for.
@@ -64,7 +65,7 @@ export const ROBOT_JOINTS: JointSpec[] = [
       xyz: { x: 0.0, y: 0.0, z: 0.08 },
       rpy: { roll: 0.0, pitch: 0.0, yaw: 0.0 }
     },
-    limitDeg: { min: -40, max: 30 }
+    limitDeg: { min: -90, max: 90 }
   },
   {
     name: 'Joint2',
@@ -76,7 +77,7 @@ export const ROBOT_JOINTS: JointSpec[] = [
       xyz: { x: -0.0375, y: 0.02, z: 0.05595 },
       rpy: { roll: -1.5708, pitch: 0.0, yaw: 0.0 }
     },
-    limitDeg: { min: 0, max: 60 }
+    limitDeg: { min: 2, max: 86 }
   },
   {
     name: 'Joint3',
@@ -88,7 +89,7 @@ export const ROBOT_JOINTS: JointSpec[] = [
       xyz: { x: 0.00027, y: -0.16, z: 0.016 },
       rpy: { roll: -3.14159, pitch: 0.0, yaw: 0.0 }
     },
-    limitDeg: { min: 0, max: 70 }
+    limitDeg: { min: 2, max: 158 }
   },
   {
     name: 'link3_joint',
@@ -100,7 +101,7 @@ export const ROBOT_JOINTS: JointSpec[] = [
       xyz: { x: -0.035, y: 0.0151, z: 0.0364 },
       rpy: { roll: -1.5708, pitch: 0.0, yaw: 1.5708 }
     },
-    limitDeg: { min: 0, max: 274 }
+    limitDeg: { min: 2, max: 305 }
   },
   {
     name: 'Joint5',
@@ -112,7 +113,7 @@ export const ROBOT_JOINTS: JointSpec[] = [
       xyz: { x: 0.0, y: -0.01002, z: 0.10323 },
       rpy: { roll: -1.5708, pitch: 1.5708, yaw: 0.0 }
     },
-    limitDeg: { min: 0, max: 165 }
+    limitDeg: { min: 2, max: 271 }
   },
   {
     name: 'Joint6',

@@ -68,19 +68,37 @@ const bool INVERT_DIR[NUM_AXES] = {false, false, true, true, true, false};
 // exact values. Change both together, or the solver will hand over angles the
 // firmware silently clamps.
 
-// The limits were recorded in the same scale as the old USTEPS_PER_DEG, so
-// correcting the calibration moves where each number sits physically. The hard
-// stop itself does not move: at the stop the step count is fixed, so the honest
-// conversion is limit_new = limit_old * scale.
+// Taken from the mechanical design in URDF.md, mapped into firmware angles
+// through the same relation the 3D view uses:
 //
-// That widens J3 (70 -> 77.8) and J4 (274 -> 353.2) and narrows J5 (280 ->
-// 165.2). Where the conversion widens a limit, the old number is kept: it is
-// not known whether these came from measurement or from the same notes as the
-// wrong gear ratios, and a limit that is too tight only costs travel, while one
-// that is too generous drives into the stop. Open J3 and J4 up once the real
-// travel has been measured against the arm.
-const float JOINT_MIN[NUM_AXES] = {-40, 0, 0, 0, 0, -360};
-const float JOINT_MAX[NUM_AXES] = {30, 60, 70, 274, 165, 360};
+//     urdf = URDF_DIRECTION * (logical - POST_HOME_ANGLES)
+//
+// This is where limits are supposed to come from. The previous values came from
+// project notes, which this bring-up caught being wrong about direction on four
+// of six axes and about homing direction on three of four - not a source to
+// take a safety limit from. The URDF was written by hand (per-joint effort and
+// velocity figures, none of them round) and never consulted.
+//
+// A software limit sits INSIDE the mechanical stop, with margin, so that
+// reaching a software limit is ordinary and reaching a stop is a fault. Three
+// degrees is taken off each upper bound for that. The lower bound is the
+// endstop end, physically anchored at zero and verified on the arm; two degrees
+// keeps ordinary motion off the switch, which the safety monitor watches.
+//
+// Verify from the inside, never by probing: jog to a limit and check clearance
+// remains. A joint that reaches its limit with room to spare has a conservative
+// limit. One that fouls first means the URDF is optimistic - tighten it.
+//
+// !! J1 is deliberately short of its design range. The URDF allows +/-160 deg,
+// !! and nothing mechanical is known to stop it, but the URDF does not model
+// !! cables, and 320 degrees of base rotation will wrap a loom that was never
+// !! routed for it. +/-90 already gives two and a half times the old range.
+// !! Open it further once the cable routing has been looked at.
+//
+// !! J6's URDF entry reads lower="0" upper="0", the placeholder a continuous
+// !! joint gets, so it carries no information. Left at a full turn either way.
+const float JOINT_MIN[NUM_AXES] = {-90,   2,   2,   2,   2, -360};
+const float JOINT_MAX[NUM_AXES] = { 90,  86, 158, 305, 271,  360};
 
 // ---------------------------------------------------------------------------
 // Calibration
@@ -264,11 +282,11 @@ const float BACKOFF_MAX_DISTANCE = 15.0f;  // degrees
 // its hard stop for 300 degrees before the firmware gave up. Bounding the seek
 // per joint turns that from destructive into a clean error.
 const float HOMING_MAX_TRAVEL[NUM_AXES] = {
-  80.0f,   // J1  range  70 deg (no endstop)
-  70.0f,   // J2  range  60 deg
-  80.0f,   // J3  range  70 deg
-  285.0f,  // J4  range 274 deg
-  175.0f,  // J5  range 165 deg after the calibration correction
+  190.0f,  // J1  range 180 deg (no endstop)
+  95.0f,   // J2  range  84 deg
+  170.0f,  // J3  range 156 deg
+  315.0f,  // J4  range 303 deg
+  280.0f,  // J5  range 269 deg
   730.0f   // J6  range 720 deg (no endstop)
 };
 
