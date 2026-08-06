@@ -124,17 +124,20 @@ limit; one that fouls first means the URDF is optimistic and it wants tightening
 Driving into a hard stop to find it is how an open-loop arm loses steps silently,
 which is the failure this bring-up started with.
 
-The reachable workspace that follows from these limits is small and strongly
-off-centre, because J1 travels only 70° and J2 only 60°:
+The reachable workspace that follows, at 13 samples per joint:
 
 | Axis | Min | Max |
 |------|-----|-----|
-| X | −203 mm | +70 mm |
-| Y | −115 mm | +138 mm |
-| Z | +146 mm | +384 mm |
+| X | −338 mm | +43 mm |
+| Y | −338 mm | +338 mm |
+| Z | +22 mm | +434 mm |
+
+106,169 cm³, against 38,816 cm³ under the notes' limits and 16,605 cm³ before the
+URDF mapping was applied to the kinematics at all.
 
 That is the axis-aligned outer bound, not the reachable set — a point inside the
-box can still be out of reach.
+box can still be out of reach, and the IK result is the authority. The 3D view
+draws this box, computed from the same model rather than from a constant.
 
 ---
 
