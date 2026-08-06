@@ -211,9 +211,9 @@ const PathVisualization: React.FC<{ visible: boolean }> = ({ visible }) => {
             />
           </mesh>
 
-          {/* Label */}
+          {/* Label, 25 mm above the marker: Z, not Y - the scene is Z-up */}
           <Html
-            position={[0, 0.025, 0]}
+            position={[0, 0, 0.025]}
             center
             distanceFactor={1}
             style={{ pointerEvents: 'none' }}
@@ -276,7 +276,7 @@ const Lighting: React.FC = () => {
 
       {/* Main directional light (sun) */}
       <directionalLight
-        position={[5, 10, 5]}
+        position={[5, -5, 10]}
         intensity={0.8}
         castShadow
         shadow-mapSize-width={2048}
@@ -289,12 +289,12 @@ const Lighting: React.FC = () => {
       />
 
       {/* Fill light from opposite side */}
-      <directionalLight position={[-5, 5, -5]} intensity={0.3} />
+      <directionalLight position={[-5, 5, 5]} intensity={0.3} />
 
       {/* Hemisphere light for ambient color */}
       <hemisphereLight
         args={[0x87CEEB, 0x545454, 0.3]}
-        position={[0, 50, 0]}
+        position={[0, 0, 50]}
       />
     </>
   );
@@ -340,9 +340,15 @@ export const RobotViewer3D: React.FC = () => {
         dpr={[1, 2]}
       >
         {/* Camera */}
+        {/* Z-up, like the URDF and the firmware. Everything placed in this
+            scene - the arm, the target marker, the trajectory line, the
+            waypoints - is in robot coordinates, where Z is height. The camera
+            was left at Three's default Y-up, so the arm was drawn lying on its
+            side. The orbit target below always assumed Z-up. */}
         <PerspectiveCamera
           makeDefault
-          position={[0.8, 0.6, 0.8]}
+          position={[0.8, -0.8, 0.6]}
+          up={[0, 0, 1]}
           fov={50}
         />
 

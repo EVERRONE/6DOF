@@ -322,8 +322,11 @@ export function createGroundPlane(size: number = 1.0): THREE.Mesh {
   });
 
   const plane = new THREE.Mesh(geometry, material);
-  plane.rotation.x = -Math.PI / 2;
-  plane.position.y = -0.01; // Slightly below origin
+  // The scene is Z-up, matching the URDF the arm is built from. PlaneGeometry is
+  // already in the XY plane, so it needs no rotation here - it used to be turned
+  // -90 degrees about X for a Y-up world, which left the floor standing on edge
+  // relative to a robot whose own up axis is Z.
+  plane.position.z = -0.01; // Slightly below the base
   plane.receiveShadow = true;
 
   return plane;
@@ -334,6 +337,10 @@ export function createGroundPlane(size: number = 1.0): THREE.Mesh {
  */
 export function createGrid(size: number = 1.0, divisions: number = 20): THREE.GridHelper {
   const grid = new THREE.GridHelper(size, divisions, 0x444444, 0x222222);
-  grid.position.y = 0;
+  // GridHelper is built in the XZ plane for a Y-up world. This scene is Z-up,
+  // like the URDF, so bring it into XY - otherwise the floor is a wall and the
+  // arm appears to lie on its side against it.
+  grid.rotation.x = Math.PI / 2;
+  grid.position.set(0, 0, 0);
   return grid;
 }
