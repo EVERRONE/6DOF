@@ -10,6 +10,7 @@ import {
   SavedPath
 } from './types';
 import { PathInterpolator } from './PathInterpolator';
+import { pointOnCircle } from './Shapes';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { Vector3 } from '../kinematics/types';
 
@@ -23,7 +24,8 @@ export const DEFAULT_PLANNER_CONFIG: PathPlannerConfig = {
   maxJointSpeed: 60,          // 60 deg/s
   maxJointAcceleration: 120,  // 120 deg/s²
   pointsPerSecond: 10,        // 10 Hz trajectory sampling
-  loopCount: 0
+  loopCount: 0,
+  holdToolOrientation: false
 };
 
 /**
@@ -62,8 +64,24 @@ export class TrajectoryPlanner {
     const skippedWaypoints: string[] = [];
     let currentAngles = [...startAngles];
 
+    // The orientation to hold across the whole path, when asked for: the one
+    // the arm starts in. Taken once, not per waypoint, so residuals cannot
+    // accumulate into the tool drifting round over a long path.
+    const heldOrientation = this.config.holdToolOrientation
+      ? ForwardKinematics.solve(startAngles).endEffectorPose.rotation
+      : undefined;
+
     for (const waypoint of waypoints) {
-      const resolved = this.interpolator.resolveWaypointAngles(waypoint, currentAngles);
+      // A figure is entered at its start point, not at its centre - the centre
+      // is where it is described from, and is usually not on the path at all.
+      const entry = waypoint.shape
+        ? { ...waypoint, position: pointOnCircle(waypoint.shape, waypoint.position, 0) }
+        : waypoint;
+      const effective = heldOrientation
+        ? { ...entry, orientation: heldOrientation }
+        : entry;
+
+      const resolved = this.interpolator.resolveWaypointAngles(effective, currentAngles);
       if (!resolved) {
         // Report it rather than only logging: a silently dropped waypoint means
         // the arm runs a different path than the operator laid out.
@@ -71,7 +89,7 @@ export class TrajectoryPlanner {
         continue;
       }
       waypointAngles.push(resolved);
-      resolvedWaypoints.push(waypoint);
+      resolvedWaypoints.push(effective);
       currentAngles = resolved;
     }
 
@@ -102,6 +120,16 @@ export class TrajectoryPlanner {
           // Hold the tool along the line when the waypoint asks for it.
           waypoint.orientation
         );
+      } else if (waypoint.shape) {
+        // Getting to a figure is an ordinary move; the figure itself is not.
+        // Handled below, after this approach segment.
+        segment = this.interpolator.interpolateJointSpace(
+          segStartAngles,
+          endAngles,
+          speed,
+          this.config.maxJointAcceleration,
+          this.config.pointsPerSecond
+        );
       } else {
         // Joint space interpolation.
         //
@@ -131,6 +159,36 @@ export class TrajectoryPlanner {
 
       segments.push(segment);
       timeOffset += segment.duration;
+
+      // Then the figure itself, sampled along the true arc. This is the whole
+      // point of holding a shape as one waypoint: the density is chosen here,
+      // by the motion, rather than fixed when the circle was described.
+      if (waypoint.shape) {
+        const centre = waypoints[i].position;
+        const arc = this.interpolator.interpolateArc(
+          waypointAngles[i],
+          waypoint.shape,
+          centre,
+          speed,
+          this.config.defaultAcceleration,
+          this.config.pointsPerSecond,
+          waypoint.orientation
+        );
+
+        arc.startWaypoint = i;
+        arc.endWaypoint = i;
+
+        const arcOffset = timeOffset;
+        arc.points = arc.points.map(p => ({ ...p, time: p.time + arcOffset }));
+
+        segments.push(arc);
+        timeOffset += arc.duration;
+
+        if (arc.points.length > 0) {
+          segStartAngles = [...arc.points[arc.points.length - 1].jointAngles];
+          continue;
+        }
+      }
       segStartAngles = endAngles;
     }
 

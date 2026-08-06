@@ -295,6 +295,29 @@ export const PathPlannerPanel: React.FC = () => {
             </select>
           </div>
 
+          {/* Path-level tool lock. Independent of what any waypoint carries:
+              taught waypoints hold joint angles and no orientation at all, so
+              without this there is no way to ask for a held tool along a taught
+              path. The orientation held is the one the arm starts the path in. */}
+          <div className="col-span-2">
+            <label className="flex items-start gap-2 text-xs cursor-pointer">
+              <input
+                type="checkbox"
+                checked={plannerConfig.holdToolOrientation}
+                onChange={e => updatePlannerConfig({ holdToolOrientation: e.target.checked })}
+                disabled={isExecuting}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="font-medium text-gray-700">Keep the tool pointing one way</span>
+                <span className="block text-gray-500">
+                  Holds the orientation the arm starts the path in. Costs reach, so a
+                  figure that fits without it may not fit with it.
+                </span>
+              </span>
+            </label>
+          </div>
+
           {/* Default speed */}
           <div>
             <label className="text-xs text-gray-500">Default Speed</label>
@@ -586,8 +609,12 @@ const WaypointItem: React.FC<WaypointItemProps> = ({
             onClick={() => !disabled && setIsEditing(true)}
             title={`X:${(waypoint.position.x * 1000).toFixed(1)} Y:${(waypoint.position.y * 1000).toFixed(1)} Z:${(waypoint.position.z * 1000).toFixed(1)}`}
           >
+            {/* A figure is one row. The coordinates are its centre, which is
+                where it was described from rather than a point on the path. */}
+            {waypoint.shape && <span className="mr-1" title="Figure">◯</span>}
             <span className="font-medium">{waypoint.label || `WP ${index + 1}`}</span>
             <span className="text-gray-400 ml-1">
+              {waypoint.shape ? 'centre ' : ''}
               ({(waypoint.position.x * 1000).toFixed(0)},
               {(waypoint.position.y * 1000).toFixed(0)},
               {(waypoint.position.z * 1000).toFixed(0)})

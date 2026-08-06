@@ -14,7 +14,8 @@ import {
   SavedPath
 } from '../motion/types';
 import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG } from '../motion/TrajectoryPlanner';
-import { ShapePlane, buildCircle } from '../motion/Shapes';
+import { makeCircleWaypoint, validateCircle } from '../motion/Shapes';
+import { ShapePlane, WaypointShape } from '../motion/types';
 import {
   HOME_POSE_DEG,
   JOINT_LIMITS_DEG,
@@ -752,28 +753,30 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       currentAngles.J4, currentAngles.J5, currentAngles.J6
     ];
 
-    const result = buildCircle(
-      {
-        centre: currentPosition,
-        radius,
-        plane,
-        clockwise,
-        // Follow the Cartesian panel's lock, so the figure is drawn the way the
-        // rest of the app is currently moving.
-        orientation: toolLocked && lockedRotation ? lockedRotation : undefined,
-        speed: plannerConfig.defaultSpeed,
-        label: `${plane} circle`
-      },
-      seed
-    );
+    const shape: WaypointShape = { kind: 'circle', radius, plane, clockwise };
 
-    if (!result.ok) {
-      get().logEvent('error', result.message);
+    // Hold the tool if either the Cartesian panel's lock or the path setting
+    // asks for it, so the figure is checked against the way it will be run.
+    const orientation =
+      plannerConfig.holdToolOrientation || toolLocked ? lockedRotation ?? undefined : undefined;
+
+    const check = validateCircle(shape, currentPosition, orientation, seed);
+    if (!check.ok) {
+      get().logEvent('error', check.message);
       return false;
     }
 
-    set(state => ({ waypoints: [...state.waypoints, ...result.waypoints] }));
-    get().logEvent('info', `Added ${result.message}`);
+    // One waypoint for the whole figure: deleting it removes the circle, not
+    // forty points of it, and the planner samples the arc itself.
+    const waypoint = makeCircleWaypoint(
+      shape,
+      currentPosition,
+      orientation,
+      plannerConfig.defaultSpeed
+    );
+
+    set(state => ({ waypoints: [...state.waypoints, waypoint] }));
+    get().logEvent('info', `Added ${check.message}`);
     return true;
   },
 

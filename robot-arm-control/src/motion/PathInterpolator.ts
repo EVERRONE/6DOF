@@ -6,7 +6,8 @@
 // path. Times are still attached, but only for progress display and duration
 // estimates.
 
-import { TrajectoryPoint, TrajectorySegment, Waypoint } from './types';
+import { TrajectoryPoint, TrajectorySegment, Waypoint, WaypointShape } from './types';
+import { pointOnCircle } from './Shapes';
 import { VelocityProfile } from './VelocityProfile';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
@@ -255,6 +256,78 @@ export class PathInterpolator {
       points,
       duration,
       distance,
+      unreachableSamples: failures
+    };
+  }
+
+  /**
+   * Sample along a figure rather than between points chosen earlier.
+   *
+   * This is why a shape is one waypoint: the path can be sampled at whatever
+   * density the motion needs, on the true arc. Expanding the figure into fixed
+   * waypoints at creation time locks in a polygon, and every later stage can
+   * only chord between its corners.
+   */
+  interpolateArc(
+    startAngles: number[],
+    shape: WaypointShape,
+    centre: Vector3,
+    speed: number,
+    acceleration: number,
+    pointsPerSecond: number,
+    orientation?: Rotation3
+  ): TrajectorySegment {
+    const length = 2 * Math.PI * shape.radius;
+    if (length < 1e-9) return emptySegment(startAngles);
+
+    const profile = new VelocityProfile(length, speed / 1000, acceleration / 1000);
+    const duration = profile.getDuration();
+
+    // Same chord rule as anywhere else on a curve, so an arc is no less round
+    // than a straight line is straight.
+    const chordSamples = Math.ceil(length / MAX_CARTESIAN_CHORD_M);
+    const timeSamples = Math.ceil(duration * Math.max(1, pointsPerSecond));
+    const steps = Math.min(
+      MAX_CARTESIAN_SAMPLES,
+      Math.max(8, chordSamples, timeSamples)
+    );
+
+    const points: TrajectoryPoint[] = [];
+    let currentAngles = [...startAngles];
+    let failures = 0;
+    let consecutiveFailures = 0;
+
+    for (let k = 0; k <= steps; k++) {
+      const s = k / steps;
+      const target = pointOnCircle(shape, centre, s);
+      const ik = this.solveAt(target, orientation, currentAngles);
+
+      if (ik.success) {
+        currentAngles = ik.jointAngles;
+        consecutiveFailures = 0;
+      } else {
+        failures++;
+        consecutiveFailures++;
+      }
+
+      points.push({
+        time: timeAtProgress(profile, s),
+        jointAngles: [...currentAngles]
+      });
+
+      if (consecutiveFailures >= MAX_CONSECUTIVE_IK_FAILURES) break;
+    }
+
+    if (points.length > 0) {
+      points[points.length - 1].velocity = Array(NUM_JOINTS).fill(0);
+    }
+
+    return {
+      startWaypoint: 0,
+      endWaypoint: 0,
+      points,
+      duration,
+      distance: length,
       unreachableSamples: failures
     };
   }

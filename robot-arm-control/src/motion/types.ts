@@ -5,9 +5,33 @@ import { Vector3 } from '../kinematics/types';
 /**
  * A waypoint in the path (Cartesian space)
  */
+/** Plane of a figure, in base coordinates. */
+export type ShapePlane = 'XY' | 'XZ' | 'YZ';
+
+/**
+ * A figure attached to a waypoint.
+ *
+ * The waypoint's position is the figure's centre, and the figure is expanded
+ * into a path only at planning time. Holding it as one item is what lets the
+ * list show one row, the 3D view draw one marker, and a delete remove the
+ * circle rather than forty points of it - and it lets the planner sample along
+ * the true arc rather than chord between points chosen earlier.
+ */
+export type WaypointShape = {
+  kind: 'circle';
+  /** Radius in metres. */
+  radius: number;
+  plane: ShapePlane;
+  /** Where on the circle to start and finish, in degrees. */
+  startAngleDeg?: number;
+  clockwise?: boolean;
+};
+
 export interface Waypoint {
   id: string;
   position: Vector3;
+  /** When set, this waypoint is a figure centred on `position`. */
+  shape?: WaypointShape;
   orientation?: { roll: number; pitch: number; yaw: number };
   /** Joint angles snapshot at this waypoint (if taught) */
   jointAngles?: number[];
@@ -123,6 +147,15 @@ export interface PathPlannerConfig {
   maxJointAcceleration: number;   // deg/s²
   pointsPerSecond: number;        // trajectory sampling rate (Hz)
   loopCount: number;              // 0 = no loop, >0 = repeat N times
+
+  /**
+   * Hold the tool's orientation for the whole path.
+   *
+   * The orientation held is the one the arm starts the path in. Without it a
+   * path solves for position alone and the wrist tips as the arm reaches -
+   * fine for moving, useless for carrying a pen or a gripper.
+   */
+  holdToolOrientation: boolean;
 }
 
 /**

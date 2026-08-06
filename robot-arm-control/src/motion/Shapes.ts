@@ -11,10 +11,9 @@
 
 import { InverseKinematics } from '../kinematics/InverseKinematics';
 import { Rotation3, Vector3 } from '../kinematics/types';
-import { Waypoint } from './types';
+import { ShapePlane, Waypoint, WaypointShape } from './types';
 
-/** Plane of the figure, in base coordinates. */
-export type ShapePlane = 'XY' | 'XZ' | 'YZ';
+export type { ShapePlane };
 
 export interface CircleSpec {
   /** Centre of the circle, in metres. Normally where the tool is now. */
@@ -75,6 +74,32 @@ function planeAxes(plane: ShapePlane): [Vector3, Vector3] {
   }
 }
 
+/**
+ * A point on a circle at fraction `t` of the way round.
+ *
+ * The primitive the arc interpolator samples: it means the path follows the
+ * true circle at whatever density the motion needs, instead of chording between
+ * points fixed when the figure was created.
+ */
+export function pointOnCircle(shape: WaypointShape, centre: Vector3, t: number): Vector3 {
+  const [u, v] = planeAxes(shape.plane);
+  const start = ((shape.startAngleDeg ?? 0) * Math.PI) / 180;
+  const sign = shape.clockwise ? -1 : 1;
+  const a = start + sign * 2 * Math.PI * t;
+  const c = Math.cos(a) * shape.radius;
+  const s = Math.sin(a) * shape.radius;
+  return {
+    x: centre.x + u.x * c + v.x * s,
+    y: centre.y + u.y * c + v.y * s,
+    z: centre.z + u.z * c + v.z * s
+  };
+}
+
+/** Total path length once round. */
+export function circleLength(shape: WaypointShape): number {
+  return 2 * Math.PI * shape.radius;
+}
+
 /** Points around a circle, without asking whether the arm can reach them. */
 export function circlePoints(spec: CircleSpec): Vector3[] {
   const segments = segmentsForCircle(spec.radius);
@@ -99,51 +124,72 @@ export function circlePoints(spec: CircleSpec): Vector3[] {
 }
 
 /**
- * Build the waypoints for a circle, and check the arm can actually get round it.
+ * Check the arm can get round a figure, without committing to a point list.
  *
- * Each point is solved from the previous solution, so the check follows the same
- * path the arm will and a figure that is only reachable by reconfiguring
- * halfway shows up as unreachable rather than as a lurch during execution.
+ * Sampling here is only for the check: the path itself is sampled later, along
+ * the true arc, at whatever density the motion needs. Each point is solved from
+ * the previous solution so the check follows the route the arm will take - a
+ * figure only reachable by reconfiguring halfway comes out as unreachable
+ * rather than as a lurch mid-execution.
  */
-export function buildCircle(spec: CircleSpec, seedAngles: number[]): ShapeResult {
+export function validateCircle(
+  shape: WaypointShape,
+  centre: Vector3,
+  orientation: Rotation3 | undefined,
+  seedAngles: number[]
+): { ok: boolean; unreachable: number; total: number; message: string } {
   const solver = new InverseKinematics();
-  const points = circlePoints(spec);
-
-  const waypoints: Waypoint[] = [];
-  const unreachable: number[] = [];
+  const segments = segmentsForCircle(shape.radius);
   let seed = [...seedAngles];
+  let unreachable = 0;
 
-  points.forEach((position, index) => {
-    const result = spec.orientation
-      ? solver.solvePose({ position, rotation: spec.orientation }, seed)
+  for (let i = 0; i <= segments; i++) {
+    const position = pointOnCircle(shape, centre, i / segments);
+    const result = orientation
+      ? solver.solvePose({ position, rotation: orientation }, seed)
       : solver.solvePosition(position, seed);
 
-    if (result.success) {
-      seed = result.jointAngles;
-    } else {
-      unreachable.push(index);
-    }
+    if (result.success) seed = result.jointAngles;
+    else unreachable++;
+  }
 
-    waypoints.push({
-      id: `${Date.now()}-${index}`,
-      position,
-      orientation: spec.orientation,
-      speed: spec.speed,
-      label: `${spec.label ?? 'Circle'} ${index + 1}`
-    });
-  });
-
-  const ok = unreachable.length === 0;
-  const held = spec.orientation ? ' with the tool held' : '';
+  const total = segments + 1;
+  const held = orientation ? ' with the tool held' : '';
+  const mm = (shape.radius * 1000).toFixed(0);
 
   return {
-    waypoints: ok ? waypoints : [],
+    ok: unreachable === 0,
     unreachable,
-    ok,
-    message: ok
-      ? `${waypoints.length} points around a ${(spec.radius * 1000).toFixed(0)} mm circle in ${spec.plane}${held}`
-      : `${unreachable.length} of ${points.length} points on this circle are out of reach${held}. ` +
-        `Try a smaller radius, a different plane, or move the centre` +
-        (spec.orientation ? ', or release the tool lock — holding it costs reach.' : '.')
+    total,
+    message:
+      unreachable === 0
+        ? `${mm} mm circle in ${shape.plane}${held}`
+        : `${unreachable} of ${total} points on this circle are out of reach${held}. ` +
+          'Try a smaller radius, a different plane, or move the centre' +
+          (orientation ? ', or release the tool lock \u2014 holding it costs reach.' : '.')
+  };
+}
+
+/**
+ * One waypoint describing a whole circle.
+ *
+ * A figure is a single intent, so it is a single item: deleting it removes the
+ * circle rather than forty points of it, the list shows one row, and the
+ * planner is free to sample the arc as finely as the motion needs instead of
+ * being stuck with points chosen when it was created.
+ */
+export function makeCircleWaypoint(
+  shape: WaypointShape,
+  centre: Vector3,
+  orientation: Rotation3 | undefined,
+  speed: number
+): Waypoint {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    position: centre,
+    shape,
+    orientation,
+    speed,
+    label: `${(shape.radius * 1000).toFixed(0)} mm circle, ${shape.plane}`
   };
 }

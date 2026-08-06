@@ -689,3 +689,65 @@ describe('store: tool orientation lock', () => {
     expect(useRobotStore.getState().lockedRotation).toBeNull();
   });
 });
+
+describe('store: figures are single waypoints', () => {
+  async function homedStore() {
+    const { port } = await connectStore();
+    port.push(STATUS_IDLE);
+    port.push(`POS ${HOME_POSE_DEG.map(v => v.toFixed(2)).join(' ')}\n`);
+    await flush();
+    return port;
+  }
+
+  it('adds one waypoint for a whole circle', async () => {
+    await homedStore();
+    useRobotStore.getState().clearWaypoints();
+
+    const added = useRobotStore.getState().addCircle({ radius: 0.03, plane: 'XY' });
+
+    expect(added).toBe(true);
+    expect(useRobotStore.getState().waypoints).toHaveLength(1);
+    expect(useRobotStore.getState().waypoints[0].shape).toMatchObject({
+      kind: 'circle',
+      radius: 0.03,
+      plane: 'XY'
+    });
+  });
+
+  it('removes the whole circle in one delete', async () => {
+    await homedStore();
+    useRobotStore.getState().clearWaypoints();
+    useRobotStore.getState().addCircle({ radius: 0.03, plane: 'XY' });
+
+    const id = useRobotStore.getState().waypoints[0].id;
+    useRobotStore.getState().removeWaypoint(id);
+
+    expect(useRobotStore.getState().waypoints).toHaveLength(0);
+  });
+
+  it('adds nothing at all when the circle does not fit', async () => {
+    await homedStore();
+    useRobotStore.getState().clearWaypoints();
+
+    const added = useRobotStore.getState().addCircle({ radius: 0.5, plane: 'XY' });
+
+    expect(added).toBe(false);
+    expect(useRobotStore.getState().waypoints).toHaveLength(0);
+    expect(
+      useRobotStore.getState().events.some(e => e.kind === 'error' && /out of reach/.test(e.text))
+    ).toBe(true);
+  });
+
+  it('plans a circle into a path the arm can stream', async () => {
+    await homedStore();
+    useRobotStore.getState().clearWaypoints();
+    useRobotStore.getState().addCircle({ radius: 0.03, plane: 'XY' });
+    useRobotStore.getState().planTrajectory();
+
+    const trajectory = useRobotStore.getState().trajectory;
+    expect(trajectory).not.toBeNull();
+    // One waypoint, but an approach segment and the arc.
+    expect(trajectory!.segments.length).toBeGreaterThanOrEqual(2);
+    expect(TrajectoryPlanner.flattenTrajectory(trajectory!).length).toBeGreaterThan(20);
+  });
+});
