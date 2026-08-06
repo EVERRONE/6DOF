@@ -65,6 +65,18 @@ public:
   void service();
 
   bool isMoving() const { return running_; }
+  /**
+   * Motion limits, adjustable at runtime for tuning by ear.
+   *
+   * Exposed through the controller rather than handing the planner out, so the
+   * queue stays its own business.
+   */
+  void setSpeedLimit(int axis, float degPerSec) { planner_.setSpeedLimit(axis, degPerSec); }
+  void setAccelLimit(int axis, float degPerSec2) { planner_.setAccelLimit(axis, degPerSec2); }
+  float speedLimit(int axis) const { return planner_.speedLimit(axis); }
+  float accelLimit(int axis) const { return planner_.accelLimit(axis); }
+  void resetMotionLimits() { planner_.resetLimits(); }
+
   uint8_t queueFree() const { return planner_.freeSlots(); }
   uint8_t queueDepth() const { return planner_.queued(); }
 

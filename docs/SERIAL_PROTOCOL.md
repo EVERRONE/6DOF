@@ -134,6 +134,43 @@ Decelerates to a stop within the normal acceleration limit, then drops the queue
 Position stays trusted. This is the right stop for a user-requested cancel or
 pause; `S` is for emergencies.
 
+### `V` - motion limits, for tuning by ear
+
+```
+V                       report every axis
+V <n> <speed> <accel>   set one axis, 1-based, deg/s and deg/s^2
+V RESET                 back to the config.h values
+```
+
+Reply to a query, one line per axis:
+
+```
+LIMIT <n> <speed> <accel> <maxSpeed> <maxAccel>
+```
+
+`speed`/`accel` are what is in force; `maxSpeed`/`maxAccel` are `TUNING_MAX_*`
+in `config.h`, the ceiling a request is held to. Setting replies with what was
+actually taken, which is not what was asked for when the request went past the
+ceiling:
+
+```
+OK V <n> <speed> <accel>
+```
+
+Acceleration decides whether the arm is quiet and can only be set by ear — run,
+listen, adjust, run again. Held in `config.h` alone that costs a re-flash per
+attempt.
+
+**Nothing is persisted.** The firmware forgets on reboot, deliberately: a tuning
+value that survives is one somebody forgets they left in, and then `config.h` no
+longer describes the machine.
+
+Refused while the arm is moving, which would alter the block the interrupt is
+executing halfway through it.
+
+> Past what an axis can hold, a stepper loses steps in silence — nothing detects
+> it, and the position report keeps counting. Re-home after any run that ground.
+
 ---
 
 ## Reports (firmware to host)
@@ -184,6 +221,7 @@ last command rather than acting on the first `IDLE` seen.
 ### Other lines
 
 ```
+LIMIT <n> ...          one axis's motion limits, in reply to V
 OK <text>              command accepted
 ERROR <text>           command rejected, or an asynchronous fault
 HOMED <n>              joint n finished homing (1-based)

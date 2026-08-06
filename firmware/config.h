@@ -194,6 +194,22 @@ const float MAX_JOINT_ACCEL[NUM_AXES] = {
   100.0f   // J6
 };
 
+// Ceiling for runtime tuning, per axis.
+//
+// MAX_JOINT_SPEED above is the working value: what the arm is currently trusted
+// to do. These are the hard bound on what tuning may ask for, so a mistyped
+// figure cannot send an axis somewhere nothing has ever tested.
+//
+// Set to the original design estimates. Those turned out to be too fast on a
+// cold arm - they are what made J3 stall and vibrate - so reaching them is not
+// expected. They are a bound, not a target.
+//
+// !! Past what an axis can hold, a stepper loses steps silently. Nothing detects
+// !! it: the position report keeps counting and stops matching the arm. After a
+// !! tuning run that produced grinding, re-home before trusting a position.
+const float TUNING_MAX_SPEED[NUM_AXES] = {60.0f, 40.0f, 60.0f, 90.0f, 120.0f, 180.0f};
+const float TUNING_MAX_ACCEL[NUM_AXES] = {150.0f, 100.0f, 150.0f, 250.0f, 300.0f, 400.0f};
+
 // Default speed used when the host does not specify one.
 const float DEFAULT_SPEED = 8.0f;  // deg/s
 

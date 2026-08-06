@@ -495,6 +495,24 @@ export class SerialManager {
         return;
       }
 
+      case 'LIMIT': {
+        // LIMIT <axis> <speed> <accel> <maxSpeed> <maxAccel>
+        if (parts.length === 6) {
+          this.emit({
+            type: 'LIMIT',
+            data: {
+              axis: parseInt(parts[1], 10) - 1,
+              speed: parseFloat(parts[2]),
+              accel: parseFloat(parts[3]),
+              maxSpeed: parseFloat(parts[4]),
+              maxAccel: parseFloat(parts[5])
+            },
+            timestamp: Date.now()
+          });
+        }
+        return;
+      }
+
       case 'STATUS': {
         // STATUS <state> <queueFree> <moving> <positionTrusted> <homedMask> <enabled>
         if (parts.length < 6) return;

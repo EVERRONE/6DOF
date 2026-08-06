@@ -122,6 +122,7 @@ void SerialProtocol::processLine(char* line) {
     case 'E': handleEnable(args); break;
     case 'S': handleStop(); break;
     case 'A': handleAbort(); break;
+    case 'V': handleLimits(args); break;
     default: sendError("Unknown command"); break;
   }
 }
@@ -243,6 +244,80 @@ void SerialProtocol::handleAbort() {
   homing_.abort();
   stepper_.decelerateToStop();
   Serial.println("OK Aborted");
+}
+
+/**
+ * V - motion limits, for tuning by ear.
+ *
+ *   V                 report every axis
+ *   V <n> <spd> <acc> set one axis, 1-based
+ *   V RESET           back to what config.h says
+ *
+ * Acceleration is the parameter that decides whether the arm is quiet, and it
+ * can only be set by ear: run a move, listen, adjust, run again. Held in
+ * config.h alone that costs a re-flash per attempt, which makes the job
+ * impractical rather than merely slow.
+ *
+ * Nothing is persisted. A tuning value that survives a reboot is one somebody
+ * forgets they left in, and then config.h no longer describes the machine.
+ */
+void SerialProtocol::handleLimits(char* args) {
+  char* cursor = args;
+  while (*cursor == ' ') cursor++;
+
+  if (*cursor == '\0') {
+    for (int i = 0; i < NUM_AXES; i++) {
+      Serial.print("LIMIT ");
+      Serial.print(i + 1);
+      Serial.print(' ');
+      Serial.print(stepper_.speedLimit(i), 2);
+      Serial.print(' ');
+      Serial.print(stepper_.accelLimit(i), 2);
+      Serial.print(' ');
+      Serial.print(TUNING_MAX_SPEED[i], 2);
+      Serial.print(' ');
+      Serial.println(TUNING_MAX_ACCEL[i], 2);
+    }
+    return;
+  }
+
+  if (cursor[0] == 'R' || cursor[0] == 'r') {
+    stepper_.resetMotionLimits();
+    Serial.println("OK Limits reset");
+    return;
+  }
+
+  float axis = 0.0f, speed = 0.0f, accel = 0.0f;
+  if (!nextFloat(&cursor, &axis) || !nextFloat(&cursor, &speed) ||
+      !nextFloat(&cursor, &accel)) {
+    sendError("V wants: axis speed accel, or RESET");
+    return;
+  }
+
+  const int index = (int)axis - 1;
+  if (index < 0 || index >= NUM_AXES) {
+    sendError("V axis out of range");
+    return;
+  }
+
+  // Changing a limit under a move in progress would alter the block the ISR is
+  // executing halfway through it.
+  if (!stepper_.isIdle()) {
+    sendError("V refused: the arm is moving");
+    return;
+  }
+
+  stepper_.setSpeedLimit(index, speed);
+  stepper_.setAccelLimit(index, accel);
+
+  // Report what was actually taken, which is not what was asked for when the
+  // request went past the ceiling.
+  Serial.print("OK V ");
+  Serial.print(index + 1);
+  Serial.print(' ');
+  Serial.print(stepper_.speedLimit(index), 2);
+  Serial.print(' ');
+  Serial.println(stepper_.accelLimit(index), 2);
 }
 
 void SerialProtocol::handleQuery() {

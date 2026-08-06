@@ -1090,6 +1090,85 @@ static bool logContains(const char* needle) {
 
 static void clearLog() { mock::hw.txLog.clear(); }
 
+// Acceleration decides whether the arm is quiet, and it can only be set by ear.
+// Held in config.h alone that costs a re-flash per attempt.
+static void testRuntimeLimits() {
+  section("protocol: motion limits adjustable at runtime");
+
+  resetWorld();
+  StepperController stepper;
+  HomingController homing(stepper);
+  SerialProtocol protocol(stepper, homing);
+  Sim sim(stepper, &homing);
+  sim.registerHardware();
+  stepper.begin();
+  homing.begin();
+  protocol.begin(115200);
+
+  clearLog();
+  feed("V");
+  pump(protocol);
+  CHECK(logContains("LIMIT 1 "));
+  CHECK(logContains("LIMIT 6 "));
+  pass("V reports every axis, with its ceiling");
+
+  clearLog();
+  feed("V 2 20 60");
+  pump(protocol);
+  CHECK(logContains("OK V 2"));
+  CHECK_NEAR(stepper.speedLimit(1), 20.0f, 0.01f);
+  CHECK_NEAR(stepper.accelLimit(1), 60.0f, 0.01f);
+  pass("one axis can be raised above what config.h currently holds");
+
+  // The working value is not the ceiling: the whole point of tuning is to find
+  // out whether the working value is too low.
+  CHECK(stepper.speedLimit(1) > MAX_JOINT_SPEED[1]);
+  pass("and the working value is not the bound");
+
+  clearLog();
+  feed("V 2 9999 9999");
+  pump(protocol);
+  CHECK_NEAR(stepper.speedLimit(1), TUNING_MAX_SPEED[1], 0.01f);
+  CHECK_NEAR(stepper.accelLimit(1), TUNING_MAX_ACCEL[1], 0.01f);
+  pass("a mistyped figure is held at the hardware ceiling");
+
+  // The reply says what was taken, not what was asked for.
+  CHECK(logContains("OK V 2"));
+  pass("and the reply reports what was actually taken");
+
+  clearLog();
+  feed("V 9 10 10");
+  pump(protocol);
+  CHECK(logContains("ERROR"));
+  pass("an axis outside the arm is refused");
+
+  clearLog();
+  feed("V RESET");
+  pump(protocol);
+  CHECK(logContains("OK Limits reset"));
+  CHECK_NEAR(stepper.speedLimit(1), MAX_JOINT_SPEED[1], 0.01f);
+  pass("RESET goes back to what config.h says");
+
+  // Changing a limit under a running move would alter the block the ISR is
+  // executing halfway through it.
+  clearLog();
+  feed("E 1");
+  pump(protocol);
+  JointAngles far;
+  for (int i = 0; i < NUM_AXES; i++) far[i] = JOINT_MIN[i];
+  far[1] = JOINT_MAX[1];
+  CHECK(stepper.queueMove(far, 10.0f));
+  sim.run(0.5);
+  CHECK(!stepper.isIdle());
+
+  clearLog();
+  feed("V 2 30 90");
+  pump(protocol);
+  CHECK(logContains("ERROR"));
+  CHECK_NEAR(stepper.speedLimit(1), MAX_JOINT_SPEED[1], 0.01f);
+  pass("refused while the arm is moving, rather than changed under it");
+}
+
 static void testProtocol() {
   section("protocol: command parsing and flow control");
 
@@ -1273,6 +1352,7 @@ int main() {
   testSafetyIgnoresHoming();
 
   testProtocol();
+  testRuntimeLimits();
   testLivePositionReporting();
 
   printf("\n=====================\n");

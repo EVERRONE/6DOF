@@ -101,6 +101,27 @@ public:
 
   bool isExecuting() const { return executing_; }
 
+  // -------------------------------------------------------------------------
+  // Runtime motion limits
+  // -------------------------------------------------------------------------
+  //
+  // Acceleration is set by ear, and that needs a fast loop: run, listen, adjust,
+  // run again. Baked into config.h it costs a re-flash per attempt, which makes
+  // the job impractical rather than merely slow.
+  //
+  // Deliberately NOT persisted. A tuning value that survives a reboot is a
+  // tuning value someone forgets they left in, and the config file stops
+  // describing the machine. Find the numbers here, then write them down.
+
+  /** Speed ceiling for one axis, deg/s. Clamped to the config value. */
+  void setSpeedLimit(int axis, float degPerSec);
+  /** Acceleration ceiling for one axis, deg/s^2. Clamped to the config value. */
+  void setAccelLimit(int axis, float degPerSec2);
+  float speedLimit(int axis) const;
+  float accelLimit(int axis) const;
+  /** Back to what config.h says. */
+  void resetLimits();
+
   /** Target of the last queued move, i.e. where the arm will end up. */
   const int32_t* plannedPosition() const { return plannerPos_; }
 
@@ -145,6 +166,8 @@ public:
   static float maxEventRate() { return (float)STEP_ISR_HZ * 0.5f; }
 
 private:
+  float speedLimit_[NUM_AXES];
+  float accelLimit_[NUM_AXES];
   MotionBlock buffer_[MOTION_QUEUE_LENGTH];
 
   // Single-producer (main loop) / single-consumer (step ISR) ring buffer.

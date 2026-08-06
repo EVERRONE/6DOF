@@ -57,6 +57,7 @@ private:
   void handleStop();
   void handleAbort();
   void handleQuery();
+  void handleLimits(char* args);
 
   void sendPosition();
   void sendEndstops();

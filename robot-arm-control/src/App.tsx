@@ -4,6 +4,7 @@ import { JointControlPanel } from './components/JointControlPanel';
 import { CartesianControlPanel } from './components/CartesianControlPanel';
 import { PathPlannerPanel } from './components/PathPlannerPanel';
 import { CommandConsole } from './components/CommandConsole';
+import { TuningPanel } from './components/TuningPanel';
 import { RobotViewer3D } from './components/RobotViewer3D';
 import { StatusBar } from './components/StatusBar';
 import { EmergencyStop } from './components/EmergencyStop';
@@ -18,6 +19,7 @@ import { SerialManager } from './communication/SerialManager';
  */
 const TABS = [
   { id: 'jog', label: 'Jog', hint: 'Per-joint nudging and homing' },
+  { id: 'tuning', label: 'Tuning', hint: 'Speed and acceleration, set by ear' },
   { id: 'cartesian', label: 'Cartesian', hint: 'XYZ target through IK' },
   { id: 'paths', label: 'Paths', hint: 'Teach waypoints and play them back' }
 ] as const;
@@ -59,6 +61,7 @@ function App() {
 
           <div className="flex-1 overflow-y-auto">
             {tab === 'jog' && <JointControlPanel />}
+            {tab === 'tuning' && <TuningPanel />}
             {tab === 'cartesian' && <CartesianControlPanel />}
             {tab === 'paths' && <PathPlannerPanel />}
           </div>

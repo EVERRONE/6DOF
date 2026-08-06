@@ -2,6 +2,39 @@
 
 MotionPlanner::MotionPlanner() : head_(0), tail_(0), executing_(false) {
   for (int i = 0; i < NUM_AXES; i++) plannerPos_[i] = 0;
+  resetLimits();
+}
+
+void MotionPlanner::resetLimits() {
+  for (int i = 0; i < NUM_AXES; i++) {
+    speedLimit_[i] = MAX_JOINT_SPEED[i];
+    accelLimit_[i] = MAX_JOINT_ACCEL[i];
+  }
+}
+
+// Bounded by TUNING_MAX_*, not by the working value: the point of tuning is to
+// find out whether the working value is too low, so it cannot be the ceiling.
+// A mistyped figure is held to what the hardware could conceivably do.
+void MotionPlanner::setSpeedLimit(int axis, float degPerSec) {
+  if (axis < 0 || axis >= NUM_AXES) return;
+  if (!(degPerSec > 0.0f)) return;
+  speedLimit_[axis] =
+      degPerSec < TUNING_MAX_SPEED[axis] ? degPerSec : TUNING_MAX_SPEED[axis];
+}
+
+void MotionPlanner::setAccelLimit(int axis, float degPerSec2) {
+  if (axis < 0 || axis >= NUM_AXES) return;
+  if (!(degPerSec2 > 0.0f)) return;
+  accelLimit_[axis] =
+      degPerSec2 < TUNING_MAX_ACCEL[axis] ? degPerSec2 : TUNING_MAX_ACCEL[axis];
+}
+
+float MotionPlanner::speedLimit(int axis) const {
+  return (axis >= 0 && axis < NUM_AXES) ? speedLimit_[axis] : 0.0f;
+}
+
+float MotionPlanner::accelLimit(int axis) const {
+  return (axis >= 0 && axis < NUM_AXES) ? accelLimit_[axis] : 0.0f;
 }
 
 void MotionPlanner::reset(const int32_t currentSteps[NUM_AXES]) {
@@ -99,8 +132,8 @@ bool MotionPlanner::enqueue(const int32_t targetSteps[NUM_AXES],
     if (b.absDelta[i] == 0) continue;
 
     const float scale = (float)eventCount / (float)b.absDelta[i];
-    const float r = MAX_JOINT_SPEED[i] * USTEPS_PER_DEG[i] * scale;
-    const float a = MAX_JOINT_ACCEL[i] * USTEPS_PER_DEG[i] * scale;
+    const float r = speedLimit_[i] * USTEPS_PER_DEG[i] * scale;
+    const float a = accelLimit_[i] * USTEPS_PER_DEG[i] * scale;
 
     if (!haveCap) {
       rateCap = r;

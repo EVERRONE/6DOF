@@ -12,6 +12,20 @@ export type FirmwareState = 'IDLE' | 'MOVING' | 'HOMING' | 'ERROR' | 'ESTOP';
  * moves it holds, so the host keeps the queue full rather than pacing points off
  * its own clock. See docs/SERIAL_PROTOCOL.md.
  */
+/**
+ * One axis's motion limits as the firmware currently holds them.
+ *
+ * `speed`/`accel` are what is in force; `maxSpeed`/`maxAccel` are the ceiling
+ * tuning may not pass. Reported by the V command.
+ */
+export interface AxisLimits {
+  axis: number;
+  speed: number;
+  accel: number;
+  maxSpeed: number;
+  maxAccel: number;
+}
+
 export interface FirmwareStatus {
   state: FirmwareState;
   /** Free slots in the firmware motion queue. */
@@ -47,4 +61,5 @@ export type SerialMessage =
   | { type: 'MOVE_ACK'; data: MoveAck; timestamp: number }
   | { type: 'OK'; data: string; timestamp: number }
   | { type: 'ERROR'; data: string; timestamp: number }
-  | { type: 'HOMED'; data: number | null; timestamp: number };
+  | { type: 'HOMED'; data: number | null; timestamp: number }
+  | { type: 'LIMIT'; data: AxisLimits; timestamp: number };

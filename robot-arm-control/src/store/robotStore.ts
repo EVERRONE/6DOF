@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { JointAngles, EndstopState, ConnectionStatus, RobotState } from '../types/robot';
 import { SerialManager } from '../communication/SerialManager';
-import { FirmwareState, FirmwareStatus } from '../communication/types';
+import { AxisLimits, FirmwareState, FirmwareStatus } from '../communication/types';
 import { Vector3, Rotation3, IKResult } from '../kinematics/types';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
@@ -102,6 +102,14 @@ interface RobotStore {
    */
   trajectoryCollision: { atPercent: number; message: string } | null;
 
+  /**
+   * Motion limits as the firmware currently holds them, one entry per axis.
+   *
+   * Populated by asking, not assumed: these can be changed at runtime while
+   * tuning, so the app has to read them back rather than mirror a constant.
+   */
+  axisLimits: AxisLimits[];
+
   // Joint space actions
   /**
    * Open the link. `manager` is a test seam: production calls this with no
@@ -132,6 +140,17 @@ interface RobotStore {
   moveToPosition: (position: Vector3) => Promise<void>;
   updateCurrentPosition: () => void;
   setToolLocked: (locked: boolean) => void;
+
+  /** Ask the firmware what its motion limits currently are. */
+  refreshAxisLimits: () => Promise<void>;
+  /**
+   * Set one axis's ceiling while the arm is running, for tuning by ear.
+   *
+   * Not persisted anywhere: the firmware forgets on reboot, deliberately, so
+   * nobody leaves a tuning value in and stops config.h describing the machine.
+   * Write the numbers down when they are right.
+   */
+  setAxisLimit: (axis: number, speed: number, accel: number) => Promise<void>;
 
   // Waypoint actions
   addWaypoint: (waypoint: Waypoint) => void;
@@ -259,6 +278,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   executionProgress: { ...initialProgress },
   plannerConfig: { ...DEFAULT_PLANNER_CONFIG },
   trajectoryCollision: null,
+  axisLimits: [],
 
   // Connect to robot
   connect: async (injected?: SerialManager) => {
@@ -333,6 +353,12 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
           case 'HOMED':
             get().logEvent('ok', `J${msg.data} homed`);
             break;
+          case 'LIMIT': {
+            const limits = [...get().axisLimits];
+            limits[msg.data.axis] = msg.data;
+            set({ axisLimits: limits });
+            break;
+          }
           case 'OK':
             get().logEvent('ok', msg.data);
             break;
@@ -552,6 +578,17 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         currentRotation: fkResult.endEffectorPose.rotation
       });
     }
+  },
+
+  refreshAxisLimits: async () => {
+    await get().sendRawCommand('V');
+  },
+
+  setAxisLimit: async (axis, speed, accel) => {
+    await get().sendRawCommand(`V ${axis + 1} ${speed.toFixed(2)} ${accel.toFixed(2)}`);
+    // Read back rather than assume: the firmware clamps to its own ceiling, and
+    // refuses outright while the arm is moving.
+    await get().refreshAxisLimits();
   },
 
   setToolLocked: (locked) => {

@@ -108,6 +108,7 @@ beforeEach(() => {
     trajectoryPositions: [],
     executionState: ExecutionState.IDLE,
     trajectoryCollision: null,
+    axisLimits: [],
     ikStatus: null,
     events: [],
     // Cartesian state. Leaving these out let a tool lock set by one test carry
@@ -847,5 +848,39 @@ describe('store: a path that folds the arm into itself', () => {
 
     useRobotStore.getState().clearWaypoints();
     expect(useRobotStore.getState().trajectoryCollision).toBeNull();
+  });
+});
+
+describe('store: motion limits at runtime', () => {
+  // Acceleration is set by ear, which needs run-listen-adjust in seconds rather
+  // than a re-flash per attempt.
+
+  it('asks the firmware what its limits are rather than assuming', async () => {
+    const { port } = await connectStore();
+    await useRobotStore.getState().refreshAxisLimits();
+    await flush();
+
+    expect(port.written.some(l => l.trim() === 'V')).toBe(true);
+  });
+
+  it('takes the values the firmware reports back', async () => {
+    const { port } = await connectStore();
+    port.push('LIMIT 2 22.00 66.00 40.00 100.00\n');
+    await flush();
+
+    const limit = useRobotStore.getState().axisLimits[1];
+    expect(limit).toMatchObject({ axis: 1, speed: 22, accel: 66, maxSpeed: 40, maxAccel: 100 });
+  });
+
+  it('reads back after setting, instead of trusting what it asked for', async () => {
+    // The firmware clamps to its own ceiling and refuses outright while moving,
+    // so what was asked for is not what is in force.
+    const { port } = await connectStore();
+    await useRobotStore.getState().setAxisLimit(1, 9999, 9999);
+    await flush();
+
+    const sent = port.written.map(l => l.trim());
+    expect(sent.some(l => l.startsWith('V 2 '))).toBe(true);
+    expect(sent.filter(l => l === 'V').length).toBeGreaterThan(0);
   });
 });
