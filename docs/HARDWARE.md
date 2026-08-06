@@ -137,32 +137,43 @@ The original project notes and `firmware/config.h` disagree on two arrays. Both
 control which way a motor turns, so getting either wrong drives a joint into a
 hard stop. **Neither can be settled without the arm.**
 
-### Direction inversion
+### Direction inversion — RESOLVED by measurement
 
-| Joint | `config.h` | Project notes |
-|-------|-----------|---------------|
-| J1 | false | false |
-| J2 | **true** | **false** |
-| J3 | **true** | **false** |
-| J4 | **false** | **true** |
-| J5 | **false** | **true** |
-| J6 | false | false |
+Each joint was jogged in the positive direction on the arm and watched against
+its endstop. Every switched axis carries its switch at the **minimum** end of
+travel, so a positive command must move the joint *away* from it.
 
-Four of six disagree.
+| Joint | Old `config.h` | Project notes | Observed | Now |
+|-------|---------------|---------------|----------|-----|
+| J1 | false | false | turns correctly | false |
+| J2 | true | false | `+` moved **toward** the switch | **false** |
+| J3 | true | false | `+` moved away — correct | **true** |
+| J4 | false | true | `+` moved **toward** the switch | **true** |
+| J5 | false | true | `+` moved **toward** the switch | **true** |
+| J6 | false | false | turns correctly | false |
 
-### Homing direction
+The notes were right about J2, J4 and J5 and wrong about J3. `config.h` was wrong
+about J2, J4 and J5 and right about J3. Neither source was reliable on its own,
+which is why this had to come off the arm.
 
-| Joint | `config.h` | Project notes |
-|-------|-----------|---------------|
-| J2 | **false** | **true** |
+### Homing direction — RESOLVED
+
+All four switched axes home toward the minimum. `HOME_POSITION` is 0 for every
+one of them, `JOINT_MIN` is 0, and the resting poses in `POST_HOME_ANGLES` are
+all positive, so a joint parks by moving up and away from its switch. The
+project notes had this right.
+
+| Joint | Old `config.h` | Now |
+|-------|---------------|-----|
+| J2 | false | **true** |
 | J3 | true | true |
-| J4 | **false** | **true** |
-| J5 | **false** | **true** |
+| J4 | false | **true** |
+| J5 | false | **true** |
 
-Three of four disagree. A wrong value here sends the joint away from its switch.
-The firmware now reports `Endstop not found in travel range, check
-HOME_TOWARD_MIN direction` after the joint's own range of travel, so the failure
-is bounded and diagnostic — but it still moves the joint the wrong way first.
+A wrong value here sends the joint away from its switch. The firmware reports
+`Endstop not found in travel range, check HOME_TOWARD_MIN direction` after the
+joint's own range of travel, so the failure is bounded and diagnostic — but it
+still moves the joint the wrong way first.
 
 ### Driver enable pin
 

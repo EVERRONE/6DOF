@@ -48,7 +48,16 @@ const uint8_t ENDSTOP_PINS[NUM_AXES] = {
 };
 
 // Direction inversion, per axis.
-const bool INVERT_DIR[NUM_AXES] = {false, true, true, false, false, false};
+//
+// Measured on the arm, not derived: each joint was jogged in the positive
+// direction and watched against its endstop, which sits at the minimum end of
+// travel on every switched axis. A positive command must move a joint away from
+// its switch. J2, J4 and J5 moved toward it and are inverted here; J3 already
+// moved correctly and keeps the value it had.
+//
+// This contradicts the old project notes on J3, which call for false. The notes
+// were right about J2, J4, J5 and wrong about J3, so the measurement stands.
+const bool INVERT_DIR[NUM_AXES] = {false, false, true, true, true, false};
 
 // ---------------------------------------------------------------------------
 // Travel limits (degrees)
@@ -171,13 +180,13 @@ const bool HAS_ENDSTOP[NUM_AXES] = {false, true, true, true, true, false};
 
 // Direction of travel to find the endstop.
 //
-// !! UNRESOLVED: the hardware notes in docs/HARDWARE.md state
-// !! HOME_TOWARD_MIN as J2=true, J3=true, J4=true, J5=true, which disagrees
-// !! with the values below for J2, J4 and J5. One of the two is wrong and it
-// !! cannot be settled without the arm. Verify per joint before running H ALL:
-// !! home ONE joint and watch which way it goes. Getting this wrong drives the
-// !! joint away from its switch and into the opposite hard stop.
-const bool HOME_TOWARD_MIN[NUM_AXES] = {false, false, true, false, false, false};
+// Resolved on the arm. Every switched axis carries its endstop at the minimum
+// end of travel: HOME_POSITION is 0 for all of them, JOINT_MIN is 0, and the
+// resting poses in POST_HOME_ANGLES are all positive, so the joint parks by
+// moving up and away from the switch. Seeking toward the minimum is therefore
+// correct on all four, which is what the old project notes said and what the
+// values below now reflect.
+const bool HOME_TOWARD_MIN[NUM_AXES] = {false, true, true, true, true, false};
 
 // Joint angle assigned once the endstop is found, and the resting pose the
 // joint is moved to afterwards.
