@@ -102,6 +102,11 @@ private:
   uint8_t debounce_[NUM_AXES];
   bool triggered_[NUM_AXES];
 
+  // Back-off retries for the current axis. The switch has to re-open before the
+  // slow approach can set a repeatable datum, and how far that takes is
+  // mechanical, so the retreat is repeated up to BACKOFF_MAX_DISTANCE.
+  uint8_t backoffAttempts_;
+
   void enterPhase(Phase phase);
   void fail(const char* message);
   void finishAxis();

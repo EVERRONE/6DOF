@@ -827,6 +827,95 @@ static void testHomingMissingEndstop() {
   pass("the failure is reported exactly once");
 }
 
+// An axis that powers up already pressed deep into its switch. J5 failed here
+// on the arm with "Endstop still closed after back-off": a single fixed
+// retraction of BACKOFF_DISTANCE did not travel far enough for the switch to
+// re-open, so homing gave up on a switch that was working perfectly.
+static void testHomingClearsADeeplyPressedSwitch() {
+  section("homing: a switch that needs more than one back-off to clear");
+
+  resetWorld();
+  for (int i = 0; i < NUM_AXES; i++) g_switchActive[i] = HAS_ENDSTOP[i];
+
+  const int axis = 4;  // J5
+
+  // Put the trip point well behind where the axis starts, so the switch reads
+  // closed from the outset and stays closed for several BACKOFF_DISTANCE steps.
+  const float pressedBy = BACKOFF_DISTANCE * 3.5f;
+  for (int i = 0; i < NUM_AXES; i++) g_switchAt[i] = 0;
+  g_switchAt[axis] = (long)(pressedBy * USTEPS_PER_DEG[axis]);
+
+  StepperController stepper;
+  HomingController homing(stepper);
+  Sim sim(stepper, &homing);
+  sim.registerHardware();
+  sim.setEndstopModel(homingEndstopModel);
+
+  stepper.begin();
+  homing.begin();
+  stepper.enable();
+
+  // The sim drives the switch model each tick; poll it here too, since this
+  // runs before the sim starts.
+  for (int i = 0; i < 40; i++) {
+    homingEndstopModel();
+    homing.pollEndstops();
+    mock::hw.millisValue++;
+  }
+  CHECK(homing.isEndstopTriggered(axis));
+  pass("the axis starts with its switch already closed");
+
+  const uint8_t axes[1] = {(uint8_t)axis};
+  CHECK(homing.start(axes, 1));
+  CHECK(sim.runUntilIdle(240.0));
+
+  if (homing.hasFailed()) printf("        reported: %s\n", homing.lastError());
+  CHECK(!homing.hasFailed());
+  pass("retreats far enough to clear it instead of failing");
+
+  CHECK(!homing.isEndstopTriggered(axis) ||
+        stepper.currentAngles()[axis] != 0.0f);
+  CHECK_NEAR(stepper.currentAngles()[axis], POST_HOME_ANGLES[axis], 0.5f);
+  pass("and still parks on the resting pose with a correct datum");
+}
+
+// A switch that never opens, however far the joint retreats, is a real fault
+// and must still be reported rather than retreated from forever.
+static void testHomingStillFailsOnAStuckSwitch() {
+  section("homing: a switch that never opens");
+
+  resetWorld();
+  for (int i = 0; i < NUM_AXES; i++) g_switchActive[i] = false;
+
+  StepperController stepper;
+  HomingController homing(stepper);
+  Sim sim(stepper, &homing);
+  sim.registerHardware();
+  // Model a switch welded shut: closed no matter where the axis is.
+  sim.setEndstopModel([]() {
+    for (int i = 0; i < NUM_AXES; i++) mock::hw.endstopClosed[i] = HAS_ENDSTOP[i];
+  });
+
+  stepper.begin();
+  homing.begin();
+  stepper.enable();
+
+  const uint8_t axes[1] = {4};
+  CHECK(homing.start(axes, 1));
+  CHECK(sim.runUntilIdle(240.0));
+
+  CHECK(homing.hasFailed());
+  printf("        reported: %s\n", homing.lastError());
+  pass("a stuck switch is still reported rather than retreated from forever");
+
+  const double retreated =
+      std::fabs((double)mock::hw.motorSteps[4]) / USTEPS_PER_DEG[4];
+  printf("        retreated %.1f deg before giving up (bound %.1f)\n",
+         retreated, (double)BACKOFF_MAX_DISTANCE);
+  CHECK(retreated <= BACKOFF_MAX_DISTANCE + BACKOFF_DISTANCE + 1.0);
+  pass("and the retreat is bounded");
+}
+
 static void testHomingRefusesJointsWithoutEndstops() {
   section("homing: joints without endstops");
 
@@ -1154,6 +1243,8 @@ int main() {
 
   testHomingBookkeeping();
   testHomingMissingEndstop();
+  testHomingClearsADeeplyPressedSwitch();
+  testHomingStillFailsOnAStuckSwitch();
   testHomingRefusesJointsWithoutEndstops();
 
   testSafetyMonitor();

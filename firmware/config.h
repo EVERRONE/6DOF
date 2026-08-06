@@ -199,6 +199,14 @@ const float HOMING_SPEED = 4.0f;        // deg/s, fast seek
 const float HOMING_FINE_SPEED = 1.0f;   // deg/s, second approach
 const float BACKOFF_DISTANCE = 2.0f;    // degrees to retract after triggering
 
+// The retreat is repeated in BACKOFF_DISTANCE steps until the switch re-opens,
+// up to this total. One fixed retraction is not enough in practice: J5 reported
+// "Endstop still closed after back-off" because a joint that starts out pressed
+// deep into its switch needs more than 2 degrees to clear it. Retreating moves
+// away from the hard stop, so a generous bound costs nothing, while a switch
+// that never opens still fails.
+const float BACKOFF_MAX_DISTANCE = 15.0f;  // degrees
+
 // Give up if the endstop has not triggered within this much travel, per joint.
 //
 // A joint cannot need more than its own range of travel to reach its switch,

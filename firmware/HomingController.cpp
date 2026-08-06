@@ -9,7 +9,8 @@ HomingController::HomingController(StepperController& stepper)
       completed_(false),
       homedAxis_(-1),
       error_(""),
-      phaseStartedMs_(0) {
+      phaseStartedMs_(0),
+      backoffAttempts_(0) {
   for (int i = 0; i < NUM_AXES; i++) {
     sequence_[i] = 0;
     debounce_[i] = 0;
@@ -187,6 +188,7 @@ void HomingController::update() {
 
   switch (phase_) {
     case PHASE_BEGIN_AXIS: {
+      backoffAttempts_ = 0;
       // If the switch is already made, skip straight to backing off it. Seeking
       // into a switch that is already closed would drive into the hard stop.
       if (isEndstopTriggered(axis)) {
@@ -225,6 +227,7 @@ void HomingController::update() {
     case PHASE_BACKOFF: {
       if (stepper_.queueAxisMove(axis, -seekDirection(axis) * BACKOFF_DISTANCE,
                                  HOMING_SPEED)) {
+        backoffAttempts_++;
         enterPhase(PHASE_BACKOFF_SETTLE);
       }
       return;
@@ -233,8 +236,19 @@ void HomingController::update() {
     case PHASE_BACKOFF_SETTLE: {
       if (!stepper_.isIdle()) return;
       if (isEndstopTriggered(axis)) {
-        // Still closed after retracting: the switch is stuck or miswired.
-        // Continuing would drive the joint into its hard stop.
+        // Retract again rather than give up on the first try. How far a joint
+        // must move for its switch to re-open is a mechanical property of the
+        // lever and the approach, not something one distance fits: a joint that
+        // powers up already pressed deep into its switch needs considerably
+        // more than one BACKOFF_DISTANCE to clear it.
+        //
+        // The retreat is away from the switch, so extra attempts move away from
+        // the hard stop behind it. A genuinely stuck or miswired switch still
+        // fails, just after a bounded larger retreat.
+        if (backoffAttempts_ * BACKOFF_DISTANCE < BACKOFF_MAX_DISTANCE) {
+          enterPhase(PHASE_BACKOFF);
+          return;
+        }
         fail("Endstop still closed after back-off");
         return;
       }
@@ -245,8 +259,10 @@ void HomingController::update() {
     case PHASE_FINE: {
       // Second, slow approach. This is what sets the repeatability of the datum,
       // so it runs at HOMING_FINE_SPEED and travels only a little further than
-      // the back-off distance.
-      if (stepper_.queueAxisMove(axis, seekDirection(axis) * BACKOFF_DISTANCE * 2.0f,
+      // the distance actually retracted - which is more than BACKOFF_DISTANCE
+      // when the switch needed several attempts to clear.
+      const float retracted = backoffAttempts_ * BACKOFF_DISTANCE;
+      if (stepper_.queueAxisMove(axis, seekDirection(axis) * retracted * 2.0f,
                                  HOMING_FINE_SPEED)) {
         enterPhase(PHASE_FINE_SETTLE);
       }
