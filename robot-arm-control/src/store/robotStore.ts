@@ -606,7 +606,19 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   },
 
   teachCurrentPosition: (label?) => {
-    const { currentAngles, currentPosition, waypoints } = get();
+    const { currentAngles, currentPosition, waypoints, firmwareStatus } = get();
+
+    // Teaching records the angles the arm is reporting. Untrusted, those are a
+    // guess, and a waypoint taught from a guess is a wrong position that only
+    // shows itself later, when the path is run.
+    if (firmwareStatus && !firmwareStatus.positionTrusted) {
+      get().logEvent(
+        'error',
+        'Not teaching this point: the reported position is not trusted until ' +
+          'the arm has been homed.'
+      );
+      return;
+    }
 
     if (!currentPosition) {
       get().updateCurrentPosition();
@@ -674,15 +686,39 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   },
 
   executeTrajectory: async () => {
-    const { trajectory, serialManager } = get();
+    const { trajectory, serialManager, firmwareStatus } = get();
 
     if (!trajectory || trajectory.segments.length === 0) {
-      console.warn('No trajectory to execute');
+      get().logEvent('error', 'Nothing to execute: plan a path first');
       return;
     }
 
     if (!serialManager) {
-      console.warn('Not connected to robot');
+      get().logEvent('error', 'Not connected to the arm');
+      return;
+    }
+
+    // A path is a list of absolute joint angles, so it only means anything if
+    // the arm agrees with the firmware about where it is. When the position is
+    // untrusted - not homed since power-up, or steps possibly lost to an
+    // emergency stop - those angles are measured from a datum that does not
+    // exist, and running them drives the arm somewhere nobody chose.
+    //
+    // The firmware will not catch this. It accepts J commands whenever the
+    // motors are on and no stop is latched; it reports the doubt in STATUS and
+    // leaves the decision to the host. Loading a saved path onto an un-homed arm
+    // and pressing Execute is the way this bites.
+    if (firmwareStatus && !firmwareStatus.positionTrusted) {
+      get().logEvent(
+        'error',
+        'Refusing to run the path: the arm has not been homed since power-up, ' +
+          'or lost its datum to a stop. Home it first (H ALL).'
+      );
+      return;
+    }
+
+    if (firmwareStatus && !firmwareStatus.enabled) {
+      get().logEvent('error', 'Refusing to run the path: the motors are off (E 1)');
       return;
     }
 

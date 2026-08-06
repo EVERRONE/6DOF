@@ -541,3 +541,75 @@ describe('store: Cartesian moves', () => {
     expect(position!.z).toBeCloseTo(expected.z, 6);
   });
 });
+
+describe('store: a path needs a datum', () => {
+  // A path is a list of absolute joint angles. If the firmware says its position
+  // is not trusted - not homed since power-up, or steps possibly lost to a stop -
+  // those angles are measured from a datum that does not exist. The firmware will
+  // not stop this: it accepts J commands whenever the motors are on and no stop
+  // is latched, reports the doubt in STATUS, and leaves the call to the host.
+
+  const STATUS_UNTRUSTED = 'STATUS IDLE 23 0 0 0 1\n';
+  const STATUS_MOTORS_OFF = 'STATUS IDLE 23 0 1 30 0\n';
+
+  it('refuses to execute when the position is not trusted', async () => {
+    const { port } = await connectStore();
+    planShortPath();
+
+    port.push(STATUS_UNTRUSTED);
+    await flush();
+
+    await useRobotStore.getState().executeTrajectory();
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(0);
+    expect(useRobotStore.getState().executionState).toBe(ExecutionState.IDLE);
+    expect(
+      useRobotStore.getState().events.some(e => e.kind === 'error' && /homed/i.test(e.text))
+    ).toBe(true);
+  });
+
+  it('refuses to execute with the motors off', async () => {
+    const { port } = await connectStore();
+    planShortPath();
+
+    port.push(STATUS_MOTORS_OFF);
+    await flush();
+
+    await useRobotStore.getState().executeTrajectory();
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(0);
+    expect(useRobotStore.getState().executionState).toBe(ExecutionState.IDLE);
+  });
+
+  it('refuses to teach a waypoint from an untrusted position', async () => {
+    const { port } = await connectStore();
+    useRobotStore.getState().clearWaypoints();
+
+    port.push(STATUS_UNTRUSTED);
+    port.push(`POS ${HOME_POSE_DEG.map(v => v.toFixed(2)).join(' ')}\n`);
+    await flush();
+
+    useRobotStore.getState().teachCurrentPosition('should not appear');
+
+    expect(useRobotStore.getState().waypoints).toHaveLength(0);
+  });
+
+  it('runs once the arm is homed', async () => {
+    const { port } = await connectStore();
+    const pointCount = planShortPath();
+
+    // Untrusted first, then homed: the gate must lift, not latch.
+    port.push(STATUS_UNTRUSTED);
+    await flush();
+    port.push(STATUS_IDLE);
+    await flush();
+
+    const run = useRobotStore.getState().executeTrajectory();
+    await settle(40);
+    port.push(STATUS_IDLE);
+    await run;
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(pointCount);
+    expect(useRobotStore.getState().executionState).toBe(ExecutionState.COMPLETED);
+  });
+});
