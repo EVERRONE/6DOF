@@ -105,10 +105,57 @@ built machine differing from its drawing.
 **J3 is different in kind.** It does not reach a mechanical stop: the arm hits
 *itself* at about 107°, well inside the design range. A single joint limit is a
 poor way to hold that, because where the arm fouls depends on where J2 and the
-wrist are — 104° is conservative in some poses and cannot be trusted to be
-conservative in all of them. It stands in until the planner checks collisions
-properly, and until then J3 near its limit deserves more suspicion than the
-other axes.
+wrist are.
+
+The app now checks self-collision directly — see
+[Self-collision](#self-collision) below — so J3's 104° is a backstop rather than
+the only protection. It stays because the collision model is 2° optimistic
+against the one measurement available.
+
+---
+
+## Self-collision
+
+Joint limits and collisions guard different failures. A limit is the end of a
+joint's own travel; past it is metal on metal, and an open-loop stepper driven
+there loses steps in silence. A collision is the arm reaching a pose where two
+parts occupy the same space while every joint sits comfortably inside its range,
+which no per-joint number can express.
+
+**1.7% of poses drawn uniformly from inside the joint limits are
+self-colliding.** Small, but not something a limit can catch.
+
+Each link carries three oriented boxes, fitted to its STL mesh along the part's
+own longest axis, in `robot-arm-control/src/kinematics/collisionModel.ts`.
+Boxes rather than spheres: these are printed plates and brackets, and a sphere
+around a 210 mm plate 30 mm thick is fat in the two directions that matter.
+Against the one collision known from the arm — J3 fouling at about 107° — the
+sphere model predicted 83° and the box model predicts 109°.
+
+Twelve of the fifteen link pairs are disabled, and it matters that they are:
+
+- **Overlapping by construction.** Adjacent links always do, and link3's box
+  reaches the wrist mount at z=103 mm where link4 and the tool are bolted on.
+  Checking them would report a collision in every pose.
+- **Never touching.** They cannot reach each other anywhere in the joint range,
+  so checking them can only cost time.
+
+That leaves shoulder-vs-forearm and upper-arm-vs-forearm carrying the
+information. The set is built by sampling 3000 poses, the same way MoveIt's setup
+assistant does it.
+
+> **A 2 mm clearance is added when checking, and the pair list is built from the
+> true geometry.** Inflating first would make more pairs overlap at the parked
+> pose, disabling the very pairs the margin exists to protect — the model then
+> reports its first J3 collision at 64° instead of 109°.
+
+> **The tool link is a placeholder**: a 4 mm stub with `TOOL_OFFSET` still zero,
+> which is why its pair with the forearm is disabled. Once a real tool is fitted
+> that becomes the pair that matters most — a pen sticking out is what will hit
+> things — and the model has to be regenerated around its real geometry.
+
+Regenerate the model if the meshes or the visual transforms in
+`RobotModel3D.applyVisualTransform` change.
 
 These come from the mechanical design in [URDF.md](../URDF.md), mapped into
 firmware angles through `urdf = URDF_DIRECTION × (logical − POST_HOME_ANGLES)`,

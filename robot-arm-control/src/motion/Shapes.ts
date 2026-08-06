@@ -10,6 +10,7 @@
 // already moving.
 
 import { InverseKinematics } from '../kinematics/InverseKinematics';
+import { checkSelfCollision } from '../kinematics/CollisionChecker';
 import { Rotation3, Vector3 } from '../kinematics/types';
 import { ShapePlane, Waypoint, WaypointShape } from './types';
 
@@ -137,11 +138,19 @@ export function validateCircle(
   centre: Vector3,
   orientation: Rotation3 | undefined,
   seedAngles: number[]
-): { ok: boolean; unreachable: number; total: number; message: string } {
+): {
+  ok: boolean;
+  unreachable: number;
+  colliding: number;
+  total: number;
+  message: string;
+} {
   const solver = new InverseKinematics();
   const segments = segmentsForCircle(shape.radius);
   let seed = [...seedAngles];
   let unreachable = 0;
+  let colliding = 0;
+  let firstCollision = '';
 
   for (let i = 0; i <= segments; i++) {
     const position = pointOnCircle(shape, centre, i / segments);
@@ -149,17 +158,43 @@ export function validateCircle(
       ? solver.solvePose({ position, rotation: orientation }, seed)
       : solver.solvePosition(position, seed);
 
-    if (result.success) seed = result.jointAngles;
-    else unreachable++;
+    if (!result.success) {
+      unreachable++;
+      continue;
+    }
+
+    seed = result.jointAngles;
+
+    // Reachable is not the same as safe: a solution can put the tool exactly
+    // where it was asked and fold the arm through itself getting there.
+    const hit = checkSelfCollision(result.jointAngles);
+    if (hit.colliding) {
+      colliding++;
+      if (!firstCollision) firstCollision = hit.message;
+    }
   }
 
   const total = segments + 1;
   const held = orientation ? ' with the tool held' : '';
   const mm = (shape.radius * 1000).toFixed(0);
 
+  if (unreachable === 0 && colliding > 0) {
+    return {
+      ok: false,
+      unreachable,
+      colliding,
+      total,
+      message:
+        `${colliding} of ${total} points on this circle fold the arm into itself ` +
+        `(${firstCollision}). Every point is reachable, so a smaller radius will ` +
+        'not help on its own - move the centre, or try another plane.'
+    };
+  }
+
   return {
-    ok: unreachable === 0,
+    ok: unreachable === 0 && colliding === 0,
     unreachable,
+    colliding,
     total,
     message:
       unreachable === 0

@@ -107,6 +107,7 @@ beforeEach(() => {
     trajectory: null,
     trajectoryPositions: [],
     executionState: ExecutionState.IDLE,
+    trajectoryCollision: null,
     ikStatus: null,
     events: [],
     // Cartesian state. Leaving these out let a tool lock set by one test carry
@@ -751,5 +752,100 @@ describe('store: figures are single waypoints', () => {
     // One waypoint, but an approach segment and the arc.
     expect(trajectory!.segments.length).toBeGreaterThanOrEqual(2);
     expect(TrajectoryPlanner.flattenTrajectory(trajectory!).length).toBeGreaterThan(20);
+  });
+});
+
+describe('store: a path that folds the arm into itself', () => {
+  async function homedStore() {
+    const { port } = await connectStore();
+    port.push(STATUS_IDLE);
+    port.push(`POS ${HOME_POSE_DEG.map(v => v.toFixed(2)).join(' ')}\n`);
+    await flush();
+    return port;
+  }
+
+  /** A waypoint the arm can reach but cannot occupy without self-collision. */
+  function collidingPose(): number[] {
+    const q = [...HOME_POSE_DEG];
+    q[2] = 130; // J3 well past where the forearm meets the shoulder
+    return q;
+  }
+
+  it('reports where a planned path goes through the arm', async () => {
+    await homedStore();
+    const store = useRobotStore.getState();
+    store.clearWaypoints();
+    store.addWaypoint({
+      id: 'bad',
+      position: ForwardKinematics.position(collidingPose()),
+      jointAngles: collidingPose(),
+      speed: 30
+    });
+    store.planTrajectory();
+
+    const collision = useRobotStore.getState().trajectoryCollision;
+    expect(collision).not.toBeNull();
+    expect(collision!.message).toMatch(/forearm/);
+  });
+
+  it('refuses to run it', async () => {
+    const port = await homedStore();
+    const store = useRobotStore.getState();
+    store.clearWaypoints();
+    store.addWaypoint({
+      id: 'bad',
+      position: ForwardKinematics.position(collidingPose()),
+      jointAngles: collidingPose(),
+      speed: 30
+    });
+    store.planTrajectory();
+
+    await useRobotStore.getState().executeTrajectory();
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(0);
+    expect(
+      useRobotStore.getState().events.some(e => e.kind === 'error' && /folds the arm/.test(e.text))
+    ).toBe(true);
+  });
+
+  it('lets a clear path through', async () => {
+    const port = await homedStore();
+    const store = useRobotStore.getState();
+    store.clearWaypoints();
+    const safe = [...HOME_POSE_DEG];
+    safe[1] = 25;
+    store.addWaypoint({
+      id: 'ok',
+      position: ForwardKinematics.position(safe),
+      jointAngles: safe,
+      speed: 30
+    });
+    store.planTrajectory();
+
+    expect(useRobotStore.getState().trajectoryCollision).toBeNull();
+
+    const run = useRobotStore.getState().executeTrajectory();
+    await settle(40);
+    port.push(STATUS_IDLE);
+    await run;
+
+    expect(commandsOfType(port, 'J ').length).toBeGreaterThan(0);
+  });
+
+  it('forgets the verdict when the waypoints are cleared', async () => {
+    await homedStore();
+    const store = useRobotStore.getState();
+    store.clearWaypoints();
+    store.addWaypoint({
+      id: 'bad',
+      position: ForwardKinematics.position(collidingPose()),
+      jointAngles: collidingPose(),
+      speed: 30
+    });
+    store.planTrajectory();
+    expect(useRobotStore.getState().trajectoryCollision).not.toBeNull();
+
+    useRobotStore.getState().clearWaypoints();
+    expect(useRobotStore.getState().trajectoryCollision).toBeNull();
   });
 });

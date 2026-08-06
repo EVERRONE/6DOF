@@ -5,6 +5,7 @@ import { FirmwareState, FirmwareStatus } from '../communication/types';
 import { Vector3, Rotation3, IKResult } from '../kinematics/types';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
+import { checkSelfCollision, firstCollidingPoint } from '../kinematics/CollisionChecker';
 import {
   Waypoint,
   Trajectory,
@@ -93,6 +94,13 @@ interface RobotStore {
   executionState: ExecutionState;
   executionProgress: ExecutionProgress;
   plannerConfig: PathPlannerConfig;
+  /**
+   * Where the planned path folds the arm into itself, or null when it is clear.
+   *
+   * Held rather than only logged, because execution has to refuse on it and the
+   * panel has to say why. Recomputed on every plan.
+   */
+  trajectoryCollision: { atPercent: number; message: string } | null;
 
   // Joint space actions
   /**
@@ -250,6 +258,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   executionState: ExecutionState.IDLE,
   executionProgress: { ...initialProgress },
   plannerConfig: { ...DEFAULT_PLANNER_CONFIG },
+  trajectoryCollision: null,
 
   // Connect to robot
   connect: async (injected?: SerialManager) => {
@@ -624,6 +633,19 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       return;
     }
 
+    // The solver satisfies position and orientation, and knows nothing about the
+    // arm's own shape. A solution can put the tool exactly where it was asked
+    // while folding the forearm through the shoulder to get there.
+    const hit = checkSelfCollision(ikResult.jointAngles);
+    if (hit.colliding) {
+      get().logEvent(
+        'error',
+        `Refusing the move: it would put the ${hit.message}. The target is ` +
+          'reachable, so approaching it from a different pose may work.'
+      );
+      return;
+    }
+
     const targetAngles: JointAngles = {
       J1: ikResult.jointAngles[0],
       J2: ikResult.jointAngles[1],
@@ -687,6 +709,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   },
 
   clearWaypoints: () => {
+    set({ trajectoryCollision: null });
     set({
       waypoints: [],
       trajectory: null,
@@ -809,6 +832,30 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const trajectory = trajectoryPlanner.planTrajectory(waypoints, startAngles);
     const positions = TrajectoryPlanner.getTrajectoryPositions(trajectory);
 
+    // Checking the waypoints is not enough: the arm can pass through itself
+    // between two poses that are each perfectly safe, and a path is where that
+    // happens - it is the only part of the app that commits the arm to a route
+    // rather than a destination. Reported at planning time, with a position, so
+    // it can be seen in the 3D preview before anything moves.
+    const points = TrajectoryPlanner.flattenTrajectory(trajectory);
+    const hit = firstCollidingPoint(points.map(p => p.jointAngles));
+    const collision = hit
+      ? {
+          atPercent:
+            points.length > 1 ? Math.round((100 * hit.index) / (points.length - 1)) : 0,
+          message: hit.result.message
+        }
+      : null;
+
+    if (collision) {
+      get().logEvent(
+        'error',
+        `This path folds the arm into itself ${collision.atPercent}% of the way ` +
+          `through (${collision.message}). It will not run until the waypoints change.`
+      );
+    }
+    set({ trajectoryCollision: collision });
+
     set({
       trajectory,
       trajectoryPositions: positions,
@@ -854,6 +901,16 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
     if (firmwareStatus && !firmwareStatus.enabled) {
       get().logEvent('error', 'Refusing to run the path: the motors are off (E 1)');
+      return;
+    }
+
+    const collision = get().trajectoryCollision;
+    if (collision) {
+      get().logEvent(
+        'error',
+        `Refusing to run the path: it folds the arm into itself ` +
+          `${collision.atPercent}% of the way through (${collision.message}).`
+      );
       return;
     }
 

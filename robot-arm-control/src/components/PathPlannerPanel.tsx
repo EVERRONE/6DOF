@@ -38,7 +38,8 @@ export const PathPlannerPanel: React.FC = () => {
     importPath,
     firmwareStatus,
     addCircle,
-    toolLocked
+    toolLocked,
+    trajectoryCollision
   } = useRobotStore();
 
   const [pathName, setPathName] = useState('');
@@ -61,6 +62,8 @@ export const PathPlannerPanel: React.FC = () => {
     ? 'Not connected'
     : waypoints.length === 0
       ? 'Teach at least one waypoint'
+      : trajectoryCollision
+        ? `This path folds the arm into itself ${trajectoryCollision.atPercent}% of the way through — ${trajectoryCollision.message}`
       : firmwareStatus && !firmwareStatus.positionTrusted
         ? 'Home the arm first — its position is not trusted, so the path would run from a datum that does not exist'
         : firmwareStatus && !firmwareStatus.enabled
