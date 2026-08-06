@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { Vector3 } from '../kinematics/types';
-import { computeWorkspaceBounds } from '../kinematics/InverseKinematics';
+import { workspaceBounds } from '../kinematics/InverseKinematics';
 
 /**
  * Cartesian Control Panel Component
@@ -32,7 +32,7 @@ export const CartesianControlPanel: React.FC = () => {
   // bound of the reachable set, so a point inside the box is not guaranteed to
   // be reachable - the IK result is the authority on that.
   const WORKSPACE_LIMITS = useMemo(() => {
-    const bounds = computeWorkspaceBounds(9);
+    const bounds = workspaceBounds(9);
     return {
       x: { min: bounds.min.x, max: bounds.max.x },
       y: { min: bounds.min.y, max: bounds.max.y },

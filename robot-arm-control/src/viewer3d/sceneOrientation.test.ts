@@ -6,7 +6,10 @@
 // drew the arm lying on its side against a floor that was standing on edge.
 
 import * as THREE from 'three';
-import { createGrid, createGroundPlane } from './RobotModel3D';
+import { createGrid, createGroundPlane, createWorkspaceBoundary } from './RobotModel3D';
+import { workspaceBounds } from '../kinematics/InverseKinematics';
+import { ForwardKinematics } from '../kinematics/ForwardKinematics';
+import { HOME_POSE_DEG } from '../kinematics/robotModel';
 
 /** World-space direction a plane's local +Z faces after its transform. */
 function normalOf(object: THREE.Object3D): THREE.Vector3 {
@@ -49,5 +52,44 @@ describe('3D scene orientation', () => {
   it('keeps the grid at the height of the base', () => {
     const grid = createGrid(2.0, 40);
     expect(grid.position.z).toBe(0);
+  });
+});
+
+describe('workspace boundary', () => {
+  // It used to be a fixed 600 x 600 x 400 mm box centred on the origin, which
+  // described no robot: this arm reaches from -316 to -23 mm in X, so most of
+  // its work area fell outside the box while the box enclosed a large volume
+  // the arm cannot enter. A boundary that is not the arm's boundary is worse
+  // than none - it invites targets that cannot be reached.
+
+  it('is built from the arm rather than from a constant', () => {
+    const b = workspaceBounds(9);
+    const box = createWorkspaceBoundary(
+      [b.min.x, b.max.x],
+      [b.min.y, b.max.y],
+      [b.min.z, b.max.z]
+    );
+
+    const size = new THREE.Box3().setFromObject(box).getSize(new THREE.Vector3());
+    expect(size.x).toBeCloseTo(b.max.x - b.min.x, 6);
+    expect(size.y).toBeCloseTo(b.max.y - b.min.y, 6);
+    expect(size.z).toBeCloseTo(b.max.z - b.min.z, 6);
+  });
+
+  it('sits where the arm actually works, off to one side of the base', () => {
+    const b = workspaceBounds(9);
+    // The whole reachable set is on one side in X: a box centred on the origin
+    // would put most of it outside.
+    expect(b.max.x).toBeLessThan(0);
+    expect(b.min.z).toBeGreaterThan(0);
+  });
+
+  it('encloses the pose the arm parks in', () => {
+    const b = workspaceBounds(9);
+    const p = ForwardKinematics.position(HOME_POSE_DEG);
+    expect(p.x).toBeGreaterThanOrEqual(b.min.x - 1e-9);
+    expect(p.x).toBeLessThanOrEqual(b.max.x + 1e-9);
+    expect(p.z).toBeGreaterThanOrEqual(b.min.z - 1e-9);
+    expect(p.z).toBeLessThanOrEqual(b.max.z + 1e-9);
   });
 });

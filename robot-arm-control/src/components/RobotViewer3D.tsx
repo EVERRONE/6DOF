@@ -11,6 +11,7 @@ import {
   createGrid
 } from '../viewer3d/RobotModel3D';
 import { Robot3DModel } from '../viewer3d/types';
+import { workspaceBounds } from '../kinematics/InverseKinematics';
 
 /**
  * Robot 3D Component
@@ -86,12 +87,20 @@ const WorkspaceBoundary: React.FC<{ visible: boolean }> = ({ visible }) => {
   const boundaryRef = useRef<THREE.Object3D>(null);
 
   useEffect(() => {
+    // Derived from the arm, not decoration. This used to be a fixed
+    // 600 x 600 x 400 mm box centred on the origin, which described no robot:
+    // the real reach runs from -316 to -23 mm in X, so most of it fell outside
+    // the box while the box enclosed a volume the arm cannot enter.
+    //
+    // Still only the axis-aligned outer bound of the reachable set - a point
+    // inside it can be out of reach, and the IK result is the authority.
+    const b = workspaceBounds(9);
     const boundary = createWorkspaceBoundary(
-      [-0.3, 0.3],  // X range: +/-300mm
-      [-0.3, 0.3],  // Y range: +/-300mm
-      [0, 0.4],     // Z range: 0-400mm
-      0x00ff00,     // Green
-      0.05          // Low opacity
+      [b.min.x, b.max.x],
+      [b.min.y, b.max.y],
+      [b.min.z, b.max.z],
+      0x00ff00,
+      0.05
     );
 
     boundaryRef.current = boundary;

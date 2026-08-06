@@ -462,6 +462,23 @@ export class InverseKinematics {
  * position (J1..J3); the wrist joints are sampled more coarsely because they
  * move the TCP much less.
  */
+/**
+ * Cached bounds, keyed by sampling density.
+ *
+ * Thousands of FK solves, and both the Cartesian panel and the 3D view want the
+ * same answer. The joint limits are compile-time constants, so the result cannot
+ * change within a run.
+ */
+const boundsCache = new Map<number, { min: Vector3; max: Vector3 }>();
+
+export function workspaceBounds(samplesPerJoint = 9): { min: Vector3; max: Vector3 } {
+  const hit = boundsCache.get(samplesPerJoint);
+  if (hit) return hit;
+  const computed = computeWorkspaceBounds(samplesPerJoint);
+  boundsCache.set(samplesPerJoint, computed);
+  return computed;
+}
+
 export function computeWorkspaceBounds(samplesPerJoint = 9): {
   min: Vector3;
   max: Vector3;
