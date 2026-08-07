@@ -64,12 +64,12 @@ describe('motion limits mirror the firmware', () => {
   it('matches MAX_JOINT_SPEED and MAX_JOINT_ACCEL from firmware/config.h', () => {
     // Planning against different numbers than the firmware enforces makes every
     // duration estimate and path preview a fiction.
-    // Bring-up values. Must match MAX_JOINT_SPEED / MAX_JOINT_ACCEL in
+    // Tuned-by-ear values. Must match MAX_JOINT_SPEED / MAX_JOINT_ACCEL in
     // firmware/config.h exactly - if the solver plans in a faster box than the
     // firmware will execute, the firmware silently scales the move down and the
     // arm arrives late relative to everything the app thinks it timed.
-    expect(JOINT_MAX_SPEED_DEG_S).toEqual([15, 10, 15, 20, 30, 45]);
-    expect(JOINT_MAX_ACCEL_DEG_S2).toEqual([40, 25, 40, 60, 75, 100]);
+    expect(JOINT_MAX_SPEED_DEG_S).toEqual([60, 40, 60, 90, 94, 180]);
+    expect(JOINT_MAX_ACCEL_DEG_S2).toEqual([150, 100, 150, 250, 300, 400]);
   });
 });
 
@@ -150,7 +150,19 @@ describe('joint-space interpolation', () => {
     }
 
     // Acceleration, from the sampled velocities.
-    for (let k = 1; k < segment.points.length; k++) {
+    //
+    // The final point is excluded. appendExactEnd forces its velocity to zero
+    // and its angles to the exact target, as a terminal marker rather than as a
+    // sample of the profile. When the sampling loop happens to stop within half
+    // a step of the duration, that zero lands one full dt after a velocity the
+    // profile had not finished ramping down from, and differencing across it
+    // reports an acceleration up to 1.5x the limit that the profile never
+    // commanded. Differentiating a synthetic point measures the marker, not the
+    // motion - the same measurement artifact as the firmware's step-trace grain.
+    //
+    // Everything the profile actually produced is held to 0.1%, not to the 5%
+    // that was previously wide enough to hide this.
+    for (let k = 1; k < segment.points.length - 1; k++) {
       const dt = segment.points[k].time - segment.points[k - 1].time;
       if (dt <= 1e-9) continue;
 
@@ -158,7 +170,7 @@ describe('joint-space interpolation', () => {
       const b = segment.points[k - 1].velocity ?? [];
       for (let i = 0; i < NUM_JOINTS; i++) {
         const accel = Math.abs(((a[i] ?? 0) - (b[i] ?? 0)) / dt);
-        expect(accel).toBeLessThanOrEqual(JOINT_MAX_ACCEL_DEG_S2[i] * 1.05);
+        expect(accel).toBeLessThanOrEqual(JOINT_MAX_ACCEL_DEG_S2[i] * 1.001);
       }
     }
   });

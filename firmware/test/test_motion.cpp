@@ -1112,17 +1112,27 @@ static void testRuntimeLimits() {
   CHECK(logContains("LIMIT 6 "));
   pass("V reports every axis, with its ceiling");
 
+  // Halfway between the working value and the ceiling, derived rather than
+  // written out: a literal here stopped testing anything the moment the tuning
+  // round raised MAX_JOINT_SPEED past it, and the test failed for the fixture's
+  // reason rather than the firmware's.
+  const float raisedSpeed = (MAX_JOINT_SPEED[1] + TUNING_MAX_SPEED[1]) / 2.0f;
+  const float raisedAccel = (MAX_JOINT_ACCEL[1] + TUNING_MAX_ACCEL[1]) / 2.0f;
+  char raise[48];
+  snprintf(raise, sizeof(raise), "V 2 %.2f %.2f", raisedSpeed, raisedAccel);
+
   clearLog();
-  feed("V 2 20 60");
+  feed(raise);
   pump(protocol);
   CHECK(logContains("OK V 2"));
-  CHECK_NEAR(stepper.speedLimit(1), 20.0f, 0.01f);
-  CHECK_NEAR(stepper.accelLimit(1), 60.0f, 0.01f);
+  CHECK_NEAR(stepper.speedLimit(1), raisedSpeed, 0.01f);
+  CHECK_NEAR(stepper.accelLimit(1), raisedAccel, 0.01f);
   pass("one axis can be raised above what config.h currently holds");
 
   // The working value is not the ceiling: the whole point of tuning is to find
   // out whether the working value is too low.
   CHECK(stepper.speedLimit(1) > MAX_JOINT_SPEED[1]);
+  CHECK(stepper.accelLimit(1) > MAX_JOINT_ACCEL[1]);
   pass("and the working value is not the bound");
 
   clearLog();

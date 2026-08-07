@@ -127,23 +127,49 @@ to its resting angle and report `HOMED n`.
 
 ## 6. Acceleration — the noise
 
-`MAX_JOINT_ACCEL` values are estimates based on the gear reductions. This is the
-one parameter that has to be set by ear.
+**Done once, and the values in `config.h` came from it.** Repeat it whenever the
+load changes, a motor is replaced, or the supply changes.
 
-For each joint, run a full-speed move over most of its travel and listen:
+Acceleration is the one parameter that has to be set by ear. Use the Tuning tab,
+which sets both limits over the `V` command so an attempt costs a slider move
+rather than a re-flash. Listen to one axis at a time, in the order J2, J3, J1,
+J4, J5, J6 — J2 carries the whole arm, so it is the rate-limiting one.
 
-| What you hear | What it means |
-|---------------|---------------|
-| Quiet ramp up and down | Correct |
-| Knock or thud at start or stop | `MAX_JOINT_ACCEL` too high for that joint — lower it |
-| Grinding at constant speed | `MAX_JOINT_SPEED` past where the driver holds torque — lower it, or raise the driver current |
-| Growl at one specific speed only | Motor resonance. J1 and J3 run near 1 rev/s at their maximum, which is the classic NEMA17 mid-band |
+| What you hear | Where in the move | What it means |
+|---------------|-------------------|---------------|
+| Quiet ramp up and down | — | Correct |
+| Knock or thud | at the start or the stop | `MAX_JOINT_ACCEL` too high for that joint |
+| Grinding, constant tone | through the middle | `MAX_JOINT_SPEED` past where the driver holds torque |
+| Growl | one speed only, gone above and below | Motor resonance, not a fault |
 
-- [ ] J1  - [ ] J2  - [ ] J3  - [ ] J4  - [ ] J5  - [ ] J6
+Raise speed by 25% and acceleration by 50% per round. Raising both together is
+safe because the *position* of the noise in the move says which one caused it.
+When a round makes a noise, go back one round and take a further 20% off — that
+is the margin for a warm motor, a sagging supply and a payload, none of which are
+present while tuning.
 
-J2 carries the whole arm and wants the gentlest ramp. Check `Vref` on each driver
-(~0.6–1.0 V depending on the motor) before blaming the acceleration for a joint
-that loses steps under load.
+Re-home after any round that ground. Lost steps are silent and the position
+report keeps counting, so tuning the next axis on top of a bad datum is tuning
+fiction.
+
+- [x] J1  - [x] J2  - [x] J3  - [x] J4  - [x] J5  - [x] J6
+
+**Result of the first round**, and the values now in `config.h`:
+
+| | J1 | J2 | J3 | J4 | J5 | J6 |
+|---|---|---|---|---|---|---|
+| speed °/s | 60 | 40 | 60 | 90 | 94 | 180 |
+| accel °/s² | 150 | 100 | 150 | 250 | 300 | 400 |
+
+> **These are tested-silent, not safe-with-margin.** Five of the six axes reached
+> `TUNING_MAX_*` without ever complaining, so the round measured the ceiling
+> rather than the arm and the 20% margin above was never taken. Only J5 stopped
+> short, at 94 °/s. The ceilings have since been doubled; a second round should
+> find where each axis actually breaks.
+
+Check `Vref` on each driver (~0.6–1.0 V depending on the motor) before blaming
+acceleration for a joint that loses steps under load. J4 and J5 run hot — see
+`HARDWARE.md`.
 
 ## 7. Stops
 

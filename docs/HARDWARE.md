@@ -316,12 +316,21 @@ reach a given temperature faster than the NEMA17s on J1 and J3 at equal load.
    from `PDN_UART` in standalone mode, and on a CNC Shield that pin's state
    varies by driver module.
 
-Both axes are wrist joints with the lightest loads on the arm (3.75:1 and 2:1)
-and now run at 20 and 30 deg/s, so there is likely room to reduce their current
-without affecting motion. Reduce and watch for lost steps.
+Both axes are wrist joints with the lightest loads on the arm (2.909:1 and
+3.390:1), so there is likely room to reduce their current without affecting
+motion. Reduce and watch for lost steps.
 
 For reference, a stepper at rated current normally reaches 60–80 °C, which feels
 alarming but is not a fault.
+
+**This got more urgent with the tuning round.** J4 and J5 went from 20 and
+30 deg/s to 90 and 94, and from 60 and 75 deg/s² to 250 and 300 — the largest
+increases on the arm, on its two smallest and hottest motors. A stepper's
+available torque falls as it heats, and these were tuned cold, so the quiet
+values found in that session are the ones least likely to survive a long run.
+The margin above them was never established, because both axes hit the tuning
+ceiling rather than a noise. If either starts losing steps after twenty minutes
+of running, this is the first place to look, not the acceleration.
 
 ### URDF angles vs firmware angles — anchor RESOLVED, signs NOT
 

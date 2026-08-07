@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { ConnectionStatus } from '../types/robot';
-import { HOME_POSE_DEG, JOINT_LIMITS_DEG, ROBOT_JOINTS } from '../kinematics/robotModel';
+import { JOINT_LIMITS_DEG, ROBOT_JOINTS } from '../kinematics/robotModel';
 
 /**
  * Tuning speed and acceleration by ear.
@@ -43,32 +43,74 @@ export const TuningPanel: React.FC = () => {
   }, [connected, refreshAxisLimits]);
 
   /**
-   * Run one axis across most of its travel, so there is a full
-   * accelerate-cruise-decelerate cycle to listen to. A short move never reaches
-   * cruise, and then only the ramp is being judged.
+   * Run one axis far enough to give a full accelerate-cruise-decelerate cycle,
+   * and no further.
+   *
+   * The sweep is derived from the limits being tested rather than being a fixed
+   * fraction of the joint's travel. Two ramps cover v^2/a in total, so twice
+   * that leaves about half the move at constant speed - enough to hear cruise as
+   * its own phase, which is what separates a speed problem from an acceleration
+   * problem.
+   *
+   * A fixed fraction was wrong in both directions. It under-ran the geared
+   * joints, where a short move never reaches cruise at all and only the ramp is
+   * being judged. And on J6 - continuous, so its limits are +/-360 - twenty to
+   * eighty percent of travel is a 432 degree swing, more than a full turn, which
+   * wraps whatever is cabled to the tool.
+   *
+   * Centred on the middle of the joint's range so the sweep is symmetric and
+   * cannot walk into a limit.
    */
+  const sweepFor = (axis: number, speed: number, accel: number) => {
+    const lo = JOINT_LIMITS_DEG.min[axis];
+    const hi = JOINT_LIMITS_DEG.max[axis];
+    const travel = hi - lo;
+
+    const wanted = accel > 0 ? (2 * speed * speed) / accel : travel;
+    // Never more than 80% of travel, so the ends stay clear, and never so short
+    // that the move is over before anything can be heard.
+    const span = Math.max(Math.min(wanted, travel * 0.8), Math.min(10, travel * 0.8));
+    const mid = (lo + hi) / 2;
+
+    return {
+      from: mid - span / 2,
+      to: mid + span / 2,
+      span,
+      // True when the joint runs out of room before it can reach the speed being
+      // asked for, so "grinding in the middle" is not a verdict available here.
+      clipped: wanted > travel * 0.8
+    };
+  };
+
   const listenTo = async (axis: number) => {
     if (busy) return;
+    const limit = axisLimits[axis];
+    if (!limit) return;
+
     setBusy(true);
     try {
-      const lo = JOINT_LIMITS_DEG.min[axis];
-      const hi = JOINT_LIMITS_DEG.max[axis];
-      const span = hi - lo;
-      const near = lo + span * 0.2;
-      const far = lo + span * 0.8;
-
+      const sweep = sweepFor(axis, limit.speed, limit.accel);
       const key = (['J1', 'J2', 'J3', 'J4', 'J5', 'J6'] as const)[axis];
-      const pose = { ...HOME_POSE_DEG };
 
-      for (const target of [near, far, near]) {
+      logEvent(
+        'info',
+        `Listen to J${axis + 1}: ${sweep.span.toFixed(0)}° sweep, ` +
+          `${sweep.from.toFixed(0)}° to ${sweep.to.toFixed(0)}°` +
+          (sweep.clipped ? ' — too short to reach cruise at this speed' : '')
+      );
+
+      for (const target of [sweep.from, sweep.to, sweep.from]) {
         setTargetAngles({ [key]: target });
         // eslint-disable-next-line no-await-in-loop
         await moveToTarget();
         // eslint-disable-next-line no-await-in-loop
         await new Promise(r => setTimeout(r, 400));
       }
-      void pose;
-      logEvent('info', `Listen to J${axis + 1}: knock at the ends is acceleration, grinding in the middle is speed`);
+
+      logEvent(
+        'info',
+        `J${axis + 1}: knock at the ends is acceleration, grinding in the middle is speed`
+      );
     } finally {
       setBusy(false);
     }
@@ -151,11 +193,23 @@ export const TuningPanel: React.FC = () => {
 
               <button
                 onClick={() => listenTo(i)}
-                disabled={blocked !== null || busy}
-                title="Run this joint across most of its travel, so there is a full ramp-cruise-ramp to listen to"
+                disabled={blocked !== null || busy || !limit}
+                title={
+                  limit
+                    ? `Sweep ${sweepFor(i, limit.speed, limit.accel).span.toFixed(0)}° ` +
+                      `(${sweepFor(i, limit.speed, limit.accel).from.toFixed(0)}° to ` +
+                      `${sweepFor(i, limit.speed, limit.accel).to.toFixed(0)}°), there and back — ` +
+                      'long enough for a full ramp-cruise-ramp at these limits'
+                    : 'Waiting for the axis limits'
+                }
                 className="px-2 py-0.5 border rounded hover:bg-gray-50 disabled:opacity-40"
               >
                 Listen
+                {limit && (
+                  <span className="ml-1 text-gray-400">
+                    {sweepFor(i, limit.speed, limit.accel).span.toFixed(0)}°
+                  </span>
+                )}
               </button>
             </div>
           );
