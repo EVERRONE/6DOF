@@ -201,7 +201,7 @@ If slider moves do not match actual joint motion, calibrate `USTEPS_PER_DEG` per
 ### Homing Sequence
 The homing sequence is:
 1. **Fast approach** - Move toward endstop at `HOMING_SPEED * HOMING_SPEED_FACTOR[joint]`
-   (15 deg/s base: J2 15, J3 17.25, J4 30, J5 30 deg/s)
+   (20 deg/s base: J2 20, J3 23, J4 40, J5 40 deg/s)
 2. **Set home angle** - Define current position as `HOME_LOGICAL_DEG` in `config.h`
 3. **Stay on endstop** - No backoff or post-home move
 

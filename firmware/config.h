@@ -88,7 +88,13 @@ const float URDF_OFFSET_DEG[6] = {
 
 // Motion parameters
 const float DEFAULT_SPEED = 30.0;  // degrees/second
-const float HOMING_SPEED = 15.0;   // degrees/second (+50% vs. previous 10.0)
+// Base approach speed for findEndstop(); scaled per joint by HOMING_SPEED_FACTOR.
+// Effective: J2 20, J3 23, J4 40, J5 40 deg/s.
+// Ceiling rationale: J4/J5 land on HOMEPOSE_MAX_SPEED_DEG_S (40), the existing limit
+// for unattended automatic motion.  stepJoint() has no acceleration ramp, so every
+// joint must stay within motor pull-in rate: J2 is the binding case at 278 full-steps/s
+// (83 RPM), J3/J4/J5 all sit below 85 full-steps/s.
+const float HOMING_SPEED = 20.0;   // degrees/second
 const float HOMING_SPEED_FACTOR[6] = {
   1.0,  // J1
   1.0,  // J2
