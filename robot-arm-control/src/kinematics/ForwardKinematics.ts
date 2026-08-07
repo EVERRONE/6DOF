@@ -23,10 +23,11 @@ import {
 import {
   NUM_JOINTS,
   ROBOT_JOINTS,
-  TOOL_OFFSET,
   URDF_DIRECTION,
   degToRad,
-  logicalToUrdfRad
+  getToolFrame,
+  logicalToUrdfRad,
+  toolFrameIsIdentity
 } from './robotModel';
 
 /**
@@ -69,11 +70,19 @@ export class ForwardKinematics {
       frames.push(T);
     }
 
-    // Apply the tool offset in the last frame to reach the TCP.
-    const tcp =
-      TOOL_OFFSET.x === 0 && TOOL_OFFSET.y === 0 && TOOL_OFFSET.z === 0
-        ? T
-        : multiply4(T, fromXyzRpy(TOOL_OFFSET, { roll: 0, pitch: 0, yaw: 0 }));
+    // Step off the flange to reach the tool. Both halves are applied: the offset
+    // moves where "the position" is, and the rotation changes what "pointing
+    // that way" means, which is what a tool lock is actually holding.
+    //
+    // Read at every call rather than captured at import, so a tool measured or
+    // calibrated mid-session takes effect immediately - including in the IK,
+    // which solves against this same chain.
+    const tcp = toolFrameIsIdentity()
+      ? T
+      : (() => {
+          const tool = getToolFrame();
+          return multiply4(T, fromXyzRpy(tool.xyz, tool.rpy));
+        })();
 
     return {
       frames,

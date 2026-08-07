@@ -35,7 +35,9 @@ import {
   NUM_JOINTS,
   clampToLimitsRad,
   degToRad,
-  radToDeg
+  getToolFrameRevision,
+  radToDeg,
+  toolFrameIsIdentity
 } from './robotModel';
 
 export interface IKOptions {
@@ -472,16 +474,22 @@ export class InverseKinematics {
  * Cached bounds, keyed by sampling density.
  *
  * Thousands of FK solves, and both the Cartesian panel and the 3D view want the
- * same answer. The joint limits are compile-time constants, so the result cannot
- * change within a run.
+ * same answer. The joint limits are compile-time constants, so within one tool
+ * frame the result cannot change.
+ *
+ * The tool frame is not a constant, though, and it moves the reachable set with
+ * it - a 100 mm tool shifts the box by 100 mm. The cache is keyed on its
+ * revision as well, so a measured tool does not leave the panel quoting ranges
+ * for a bare flange and rejecting targets the arm can now reach.
  */
-const boundsCache = new Map<number, { min: Vector3; max: Vector3 }>();
+const boundsCache = new Map<string, { min: Vector3; max: Vector3 }>();
 
 export function workspaceBounds(samplesPerJoint = 9): { min: Vector3; max: Vector3 } {
-  const hit = boundsCache.get(samplesPerJoint);
+  const key = `${samplesPerJoint}:${getToolFrameRevision()}`;
+  const hit = boundsCache.get(key);
   if (hit) return hit;
   const computed = computeWorkspaceBounds(samplesPerJoint);
-  boundsCache.set(samplesPerJoint, computed);
+  boundsCache.set(key, computed);
   return computed;
 }
 
@@ -506,8 +514,11 @@ export function computeWorkspaceBounds(samplesPerJoint = 9): {
     grid(2, samplesPerJoint),
     grid(3, wristSteps),
     grid(4, wristSteps),
-    grid(5, 1) // J6 spins the tool about its own axis; with a zero tool
-               // offset it cannot move the TCP at all.
+    // J6 spins the tool about frame 6's own axis. On a bare flange the TCP sits
+    // on that axis, so J6 cannot move it and one sample is enough. A tool with
+    // any offset off that axis sweeps a circle of that radius, so it has to be
+    // sampled like the other wrist joints.
+    grid(5, toolFrameIsIdentity() ? 1 : wristSteps)
   ];
 
   for (const q1 of axes[0]) {

@@ -5,6 +5,7 @@ import { CartesianControlPanel } from './components/CartesianControlPanel';
 import { PathPlannerPanel } from './components/PathPlannerPanel';
 import { CommandConsole } from './components/CommandConsole';
 import { TuningPanel } from './components/TuningPanel';
+import { ToolFramePanel } from './components/ToolFramePanel';
 import { RobotViewer3D } from './components/RobotViewer3D';
 import { StatusBar } from './components/StatusBar';
 import { EmergencyStop } from './components/EmergencyStop';
@@ -62,7 +63,12 @@ function App() {
           <div className="flex-1 overflow-y-auto">
             {tab === 'jog' && <JointControlPanel />}
             {tab === 'tuning' && <TuningPanel />}
-            {tab === 'cartesian' && <CartesianControlPanel />}
+            {tab === 'cartesian' && (
+              <>
+                <ToolFramePanel />
+                <CartesianControlPanel />
+              </>
+            )}
             {tab === 'paths' && <PathPlannerPanel />}
           </div>
 

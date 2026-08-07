@@ -22,8 +22,13 @@ import {
   HOME_POSE_DEG,
   JOINT_LIMITS_DEG,
   NUM_JOINTS,
-  clampToLimitsDeg
+  ToolFrame,
+  clampToLimitsDeg,
+  getToolFrame,
+  resetToolFrame as resetModelToolFrame,
+  setToolFrame as setModelToolFrame
 } from '../kinematics/robotModel';
+import { loadToolFrame, saveToolFrame } from './toolFrameStorage';
 
 /** One line for the on-screen event log. */
 export interface RobotEvent {
@@ -105,6 +110,13 @@ interface RobotStore {
   /** Tool acceleration along a linear move, mm/s^2. */
   cartesianAccel: number;
 
+  /**
+   * Where the tool is relative to the flange. Mirrors the kinematic model's own
+   * copy, which is what FK and IK read; held here so the UI re-renders when it
+   * changes.
+   */
+  toolFrame: ToolFrame;
+
   // UI state
   manualSpeed: number;
 
@@ -167,6 +179,19 @@ interface RobotStore {
   moveAlongLine: (position: Vector3, orientation?: Rotation3) => Promise<void>;
   setCartesianMode: (mode: 'linear' | 'joint') => void;
   setCartesianSpeed: (mmPerSecond: number) => void;
+  /**
+   * Set the tool frame, in the model and here, and remember it.
+   *
+   * Changing it moves the TCP, so anything already captured against the old one
+   * is stale: a held orientation was recorded for a different tool and the
+   * reported position was measured to a different point. Both are cleared rather
+   * than silently reinterpreted.
+   */
+  setToolFrame: (frame: Partial<ToolFrame>) => void;
+  /** Back to the bare flange. */
+  resetToolFrame: () => void;
+  /** Drop everything that was measured against the previous tool frame. */
+  afterToolFrameChange: () => void;
   updateCurrentPosition: () => void;
   setToolLocked: (locked: boolean) => void;
 
@@ -347,6 +372,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   // the duration estimate rather than control of the arm.
   cartesianSpeed: 50,
   cartesianAccel: 200,
+  // Pushed into the kinematic model as well as held here, because FK and IK read
+  // the model's copy and the store's is only for rendering. Done at module load
+  // so a remembered tool is in force before the first solve, not after it.
+  toolFrame: setModelToolFrame(loadToolFrame()),
   manualSpeed: 30,
 
   // Trajectory initial state
@@ -671,6 +700,42 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   },
 
   setCartesianMode: (mode) => set({ cartesianMode: mode }),
+
+  setToolFrame: (frame) => {
+    const applied = setModelToolFrame(frame);
+    saveToolFrame(applied);
+    set({ toolFrame: applied });
+    get().afterToolFrameChange();
+  },
+
+  resetToolFrame: () => {
+    const applied = resetModelToolFrame();
+    saveToolFrame(applied);
+    set({ toolFrame: applied });
+    get().afterToolFrameChange();
+  },
+
+  /**
+   * Everything that was measured against the old tool is now wrong.
+   *
+   * The held orientation was captured for a tool pointing a different way, and
+   * the reported position was measured to a different point - moving the TCP by
+   * 100 mm does not move the arm, it changes what the number means. Reinterpreting
+   * them silently would leave a tool lock holding an attitude nobody chose. The
+   * position is recomputed from the joint angles, which have not changed and are
+   * still true.
+   */
+  afterToolFrameChange: () => {
+    if (get().toolLocked) {
+      set({ toolLocked: false, lockedRotation: null });
+      get().logEvent(
+        'info',
+        'Tool lock released: the orientation it was holding was captured for the previous tool frame'
+      );
+    }
+    set({ ikStatus: null, targetPosition: null });
+    get().updateCurrentPosition();
+  },
 
   setCartesianSpeed: (mmPerSecond) => {
     const speed = Math.max(1, Math.min(500, mmPerSecond));

@@ -184,9 +184,14 @@ export const LINK_BOXES: OrientedBox[][] = [
  *   link1-link3    0.9%  CHECKED
  *
  * !! link3-link5 is disabled because link5 is a placeholder: a 4 mm stub at the
- * !! wrist, with TOOL_OFFSET still zero. Once a real tool is fitted this becomes
- * !! the pair that matters most - a pen sticking out is what will hit things -
- * !! and this model has to be regenerated around its real geometry.
+ * !! wrist, sized for a bare flange. Once a real tool is fitted this becomes the
+ * !! pair that matters most - a pen sticking out is what will hit things - and
+ * !! this model has to be regenerated around its real geometry.
+ * !!
+ * !! Setting a tool frame does NOT do that. The tool frame moves where the TCP
+ * !! is, so FK, IK and the viewer all follow it; the boxes here are geometry and
+ * !! know nothing about it. A tool can be measured, fitted and driven around
+ * !! while the collision checker still believes the arm ends at the flange.
  */
 export const ALLOWED_PAIRS: ReadonlyArray<readonly [number, number]> = [
   [0, 1],

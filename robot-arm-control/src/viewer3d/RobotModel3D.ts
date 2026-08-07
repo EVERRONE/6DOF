@@ -5,7 +5,7 @@
 import * as THREE from 'three';
 import { JointNode, Robot3DModel } from './types';
 import { loadAllRobotMeshes, createMeshFromGeometry, getLinkColor } from './STLLoader';
-import { ROBOT_JOINTS, logicalToUrdfRad } from '../kinematics/robotModel';
+import { ROBOT_JOINTS, getToolFrame, logicalToUrdfRad } from '../kinematics/robotModel';
 
 /**
  * Build 3D robot model from STL meshes
@@ -215,6 +215,32 @@ export class RobotModel3DBuilder {
 
       joint.group.setRotationFromQuaternion(finalQuat);
     }
+
+    this.placeToolMarker();
+  }
+
+  /**
+   * Put the end-effector axes where the tool actually is.
+   *
+   * The marker is parented to frame 6, so with a bare flange it needs no
+   * transform of its own. Once a tool is measured it must step off the flange
+   * exactly as ForwardKinematics does, or the viewer draws its axes in one place
+   * while the panels report a position somewhere else - and this marker is the
+   * thing an operator looks at to decide whether the tool is pointing where they
+   * asked. Applied on every pose update rather than at build time, so a tool
+   * measured mid-session moves the marker straight away.
+   */
+  private placeToolMarker(): void {
+    const marker = this.model?.endEffectorMarker;
+    if (!marker) return;
+
+    const tool = getToolFrame();
+    marker.position.set(tool.xyz.x, tool.xyz.y, tool.xyz.z);
+    // Same convention as the URDF origins above: rpy is extrinsic XYZ, which is
+    // Three.js Euler order 'ZYX'.
+    marker.setRotationFromEuler(
+      new THREE.Euler(tool.rpy.roll, tool.rpy.pitch, tool.rpy.yaw, 'ZYX')
+    );
   }
 
   /**

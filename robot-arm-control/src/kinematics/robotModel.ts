@@ -133,14 +133,99 @@ export const ROBOT_JOINTS: JointSpec[] = [
 ];
 
 /**
- * Tool centre point, expressed in the frame of the last joint (link5).
+ * Where the tool is, relative to the flange.
  *
- * Zero means the TCP is the origin of frame 6, which is where the 3D viewer
- * attaches its end-effector axes marker. Set this once the real gripper /
- * tool geometry is known so that FK, IK and the viewer all agree on what
- * "the tip" means.
+ * The full transform from frame 6 to the tool centre point:
+ *
+ *   T_tcp = T_6 * Translate(xyz) * R_rpy(rpy)
+ *
+ * Both halves matter, and they answer different questions.
+ *
+ * **xyz** says where the tip is. Without it "the position" is the flange origin,
+ * so every wrist rotation swings the real tip through an arc the software cannot
+ * see. A 100 mm tool turned 10 degrees moves its tip 17 mm while the reported
+ * position does not change at all.
+ *
+ * **rpy** says which way the tool points. Without it the tool's axes are assumed
+ * to be the flange's axes, and there is nowhere to put the difference. That is
+ * what makes "hold the tool level" mean the flange is level, which is only the
+ * same thing if the tool was bolted on perfectly square - and it never is. This
+ * is also the only place a measured calibration can go: level the base, command
+ * the tool to a known attitude, read the error off an inclinometer, and put the
+ * difference here.
  */
-export const TOOL_OFFSET: Vector3 = { x: 0, y: 0, z: 0 };
+export interface ToolFrame {
+  /** TCP position in frame 6, metres. */
+  xyz: Vector3;
+  /** TCP orientation relative to frame 6, fixed-axis rpy in radians. */
+  rpy: Rotation3;
+}
+
+/**
+ * A bare flange: the TCP is the origin of frame 6, pointing the way frame 6
+ * points. What the model assumes until somebody measures the tool.
+ */
+export const DEFAULT_TOOL_FRAME: ToolFrame = {
+  xyz: { x: 0, y: 0, z: 0 },
+  rpy: { roll: 0, pitch: 0, yaw: 0 }
+};
+
+let currentToolFrame: ToolFrame = cloneToolFrame(DEFAULT_TOOL_FRAME);
+
+/**
+ * Bumped on every change, so anything caching a result derived from the chain
+ * can tell that the chain moved.
+ *
+ * The workspace bounds are the case that matters: they cost thousands of FK
+ * solves and were cached on the reasoning that the joint limits are compile-time
+ * constants and the result therefore cannot change within a run. A settable tool
+ * makes that false - a 100 mm tool moves the reachable box by 100 mm - and a
+ * stale box would quietly reject targets the arm can reach.
+ */
+let toolFrameRevision = 0;
+
+function cloneToolFrame(frame: ToolFrame): ToolFrame {
+  return { xyz: { ...frame.xyz }, rpy: { ...frame.rpy } };
+}
+
+/** The tool frame in force. Read at every FK call, so changes take effect at once. */
+export function getToolFrame(): ToolFrame {
+  return cloneToolFrame(currentToolFrame);
+}
+
+/** Which revision of the tool frame is in force. See toolFrameRevision. */
+export function getToolFrameRevision(): number {
+  return toolFrameRevision;
+}
+
+/** True when the tool frame is the bare flange, which lets FK skip a multiply. */
+export function toolFrameIsIdentity(): boolean {
+  const { xyz, rpy } = currentToolFrame;
+  return (
+    xyz.x === 0 && xyz.y === 0 && xyz.z === 0 &&
+    rpy.roll === 0 && rpy.pitch === 0 && rpy.yaw === 0
+  );
+}
+
+/**
+ * Set the tool frame. Partial, so an offset can be measured before a rotation
+ * is, which is the order they are usually found in.
+ */
+export function setToolFrame(frame: Partial<ToolFrame>): ToolFrame {
+  currentToolFrame = {
+    xyz: { ...currentToolFrame.xyz, ...(frame.xyz ?? {}) },
+    rpy: { ...currentToolFrame.rpy, ...(frame.rpy ?? {}) }
+  };
+  toolFrameRevision++;
+  return getToolFrame();
+}
+
+/** Back to the bare flange. */
+export function resetToolFrame(): ToolFrame {
+  currentToolFrame = cloneToolFrame(DEFAULT_TOOL_FRAME);
+  toolFrameRevision++;
+  return getToolFrame();
+}
 
 /** Joint limits in degrees, ordered J1..J6. */
 export const JOINT_LIMITS_DEG = {

@@ -149,10 +149,15 @@ assistant does it.
 > pose, disabling the very pairs the margin exists to protect — the model then
 > reports its first J3 collision at 64° instead of 109°.
 
-> **The tool link is a placeholder**: a 4 mm stub with `TOOL_OFFSET` still zero,
-> which is why its pair with the forearm is disabled. Once a real tool is fitted
-> that becomes the pair that matters most — a pen sticking out is what will hit
-> things — and the model has to be regenerated around its real geometry.
+> **The tool link is a placeholder**: a 4 mm stub sized for a bare flange, which
+> is why its pair with the forearm is disabled. Once a real tool is fitted that
+> becomes the pair that matters most — a pen sticking out is what will hit things
+> — and the model has to be regenerated around its real geometry.
+>
+> Measuring a tool frame does not do this. The tool frame moves the TCP, so FK,
+> IK and the viewer follow it; the collision boxes are geometry and know nothing
+> about it. A tool can be fitted, measured and driven around while the checker
+> still believes the arm ends at the flange.
 
 Regenerate the model if the meshes or the visual transforms in
 `RobotModel3D.applyVisualTransform` change.

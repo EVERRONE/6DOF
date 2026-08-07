@@ -113,12 +113,61 @@ link4 (J6 housing)
 link5 (end effector)
 ```
 
-### Tool centre point
+### Tool frame
 
-`TOOL_OFFSET` in `robotModel.ts` is the TCP expressed in frame 6. It is
-currently `(0, 0, 0)`, which puts the TCP at the origin of frame 6 — exactly
-where the 3D viewer attaches its end-effector axes marker. Set it once the real
-gripper geometry is known, and FK, IK and the viewer all follow.
+The step from the flange to the tool:
+
+```
+T_tcp = T_6 * Translate(xyz) * R_rpy(rpy)
+```
+
+Held in `robotModel.ts` as a `ToolFrame`, settable at runtime through
+`setToolFrame` and read by FK at every call, so a tool measured mid-session takes
+effect immediately — including inside the IK, which solves against this same
+chain. `DEFAULT_TOOL_FRAME` is the compiled-in answer and is currently a **bare
+flange**, both halves zero.
+
+The two halves answer different questions and are worth keeping apart.
+
+**`xyz` — where the tip is.** Without it "the position" is the flange origin, so
+every wrist rotation swings the real tip through an arc nothing in the software
+can see. A 100 mm tool turned 10° moves its tip 17 mm while the reported position
+does not change at all. It is also what lets J6 move the TCP: on a bare flange
+the TCP sits on J6's own axis, so spinning it moves nothing, which is why
+`computeWorkspaceBounds` takes a single J6 sample there and the full grid once a
+tool is fitted.
+
+**`rpy` — which way it points.** The rotation is applied *after* the translation,
+so it cannot move the tip; what it changes is what an orientation *means*. Ask
+for an attitude and it is the tool that ends up in it — the flange goes wherever
+it must so that the tool does. Without it the tool's axes are assumed to be the
+flange's, so "hold the tool level" silently means "hold the flange level", which
+is the same thing only if the tool was bolted on perfectly square. This is also
+the only place a measured calibration can go: level the base, command the tool to
+a known attitude, read the error off an inclinometer, put the difference here.
+
+Three things follow the tool frame and had to be told about it:
+
+| | Why |
+|---|---|
+| The Jacobian | Already correct — its linear columns are `axis × (p_tcp − p_joint)`, and `p_tcp` now includes the tool |
+| `workspaceBounds` cache | Keyed on the tool frame's revision. It was cached on the reasoning that the joint limits are compile-time constants; a 100 mm tool moves the box by 100 mm, and a stale one rejects targets the arm can reach |
+| The viewer's axes marker | Parented to frame 6 and now offset by the tool frame, or it draws the axes in one place while the panels report a position somewhere else |
+
+**Not** told about it: the collision model. The tool is not a shape anywhere —
+`collisionModel.ts` has boxes for the links only. A long tool can hit the arm
+without anything noticing.
+
+The Tool frame panel edits it in millimetres and degrees, remembers it in
+`localStorage`, and prints the `DEFAULT_TOOL_FRAME` literal to paste back here.
+Storage is a convenience, not the source of truth: a value that only exists in
+one browser is one nobody can review and that differs between two machines
+driving the same arm.
+
+> Changing the tool frame invalidates anything measured against the old one. A
+> held orientation was captured for a tool pointing a different way, and a
+> reported position was measured to a different point. The store releases the
+> tool lock and clears the IK status rather than reinterpreting them.
 
 ---
 

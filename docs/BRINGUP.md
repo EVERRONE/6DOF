@@ -198,9 +198,31 @@ acceleration for a joint that loses steps under load. J4 and J5 run hot — see
       IK should report a residual well under 1 mm.
 - [ ] Jog 20 mm in X, then 20 mm in Z, and measure the actual tool movement. A
       consistent scale error points at `USTEPS_PER_DEG`; a direction error points
-      at the URDF; a large offset points at `TOOL_OFFSET`, which is currently zero.
-- [ ] Set `TOOL_OFFSET` in `robot-arm-control/src/kinematics/robotModel.ts` once
-      the real tool geometry is known.
+      at the URDF; a large fixed offset points at the tool frame.
+
+### Measuring the tool frame
+
+Use the **Tool frame** panel at the top of the Cartesian tab. Millimetres and
+degrees; it remembers what you enter and prints the literal to paste into
+`robotModel.ts`.
+
+- [ ] **Offset.** Measure from the flange face to the tool tip along frame 6's
+      three axes. Check it: spin J6 through 180°. The tip should sweep a circle
+      of twice the radial offset, and the reported position should follow it. On
+      a bare flange the reported position does not move at all, which is the
+      quickest way to tell the offset is still zero.
+- [ ] **Rotation.** Level the base first, or this measures the table. Command the
+      tool to a known attitude, put a digital inclinometer on it, and enter the
+      difference. Roll and pitch come straight off the gauge; yaw needs a square
+      or a straight edge against a known axis.
+- [ ] Paste the printed `DEFAULT_TOOL_FRAME` into
+      `robot-arm-control/src/kinematics/robotModel.ts`. Until you do, the value
+      lives in one browser's local storage and another machine driving this arm
+      has a different idea of where the tool is.
+
+> Fitting a tool does **not** teach the collision checker about it.
+> `collisionModel.ts` carries boxes for the links only, so a long tool can reach
+> the arm without anything noticing.
 
 ## 9. A path, end to end
 
@@ -224,7 +246,7 @@ Update these together, and delete the conflicting columns from
 - `firmware/config.h` — `INVERT_DIR`, `HOME_TOWARD_MIN`, `USTEPS_PER_DEG`,
   `MAX_JOINT_ACCEL`, `MAX_JOINT_SPEED`
 - `robot-arm-control/src/kinematics/robotModel.ts` — `JOINT_MAX_SPEED_DEG_S`,
-  `JOINT_MAX_ACCEL_DEG_S2`, and `TOOL_OFFSET`
+  `JOINT_MAX_ACCEL_DEG_S2`, and `DEFAULT_TOOL_FRAME`
 
 The mirrored values are asserted by tests in both projects, so if you change one
 side only, the suite tells you.
