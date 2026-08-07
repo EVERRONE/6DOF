@@ -27,6 +27,8 @@
     "zustand": "^5.0.11"
   },
   "scripts": {
+    "launch": "node scripts/launch.mjs",
+    "update": "node scripts/launch.mjs --update-only",
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",

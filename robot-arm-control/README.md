@@ -28,9 +28,28 @@ A React + TypeScript web application for controlling a 6-axis robot arm via the 
 - Chrome or Edge browser
 - Robot arm with Teensy firmware uploaded
 
-### Setup
+### Setup (no command line)
+Double-click the launcher in the repository root:
+
+| Platform | File |
+| --- | --- |
+| Windows | `start-robot-arm.bat` |
+| macOS | `start-robot-arm.command` |
+| Linux | `start-robot-arm.sh` |
+
+It pulls the latest commits, installs dependencies when `package-lock.json`
+changed, starts the dev server and opens the app in Chrome or Edge. On Windows,
+`create-desktop-shortcut.bat` puts an icon on the desktop for it.
+
+See [`docs/RUNNING_THE_APP.md`](../docs/RUNNING_THE_APP.md) for flags and
+troubleshooting.
+
+### Setup (command line)
 ```bash
-npm install
+npm run launch    # same as the launcher above
+npm run update    # pull + install only, no server
+
+npm install       # or do it manually
 npm start
 ```
 

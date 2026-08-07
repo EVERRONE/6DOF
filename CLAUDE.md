@@ -149,6 +149,8 @@ Meaning:
 Run these from `robot-arm-control/`:
 
 ```bash
+npm run launch
+npm run update
 npm start
 npm test -- --watchAll=false --runInBand
 npm run build
@@ -159,6 +161,8 @@ npm run model:fit -- <samples.json> [output.json]
 Notes:
 
 - This is CRA, not Vite. Use `npm start`, not `npm run dev`.
+- `npm run launch` is the operator entry point (`scripts/launch.mjs`): fast-forward pull, conditional `npm ci`, dev server on a free port, opens Chrome/Edge. The root `start-robot-arm.bat` / `.command` / `.sh` wrappers are double-clickable front ends for it. See `docs/RUNNING_THE_APP.md`.
+- The launcher restores `package-lock.json` to HEAD when npm rewrites it during its own install. Without that, a rewritten lockfile leaves the tree permanently dirty and every later start silently refuses to pull.
 - Web Serial requires Chrome or Edge. Firefox and Safari are not usable for live hardware control here.
 - The repo root path contains spaces, so prefer setting the working directory explicitly before running commands.
 
