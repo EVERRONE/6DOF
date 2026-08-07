@@ -159,44 +159,47 @@ const float USTEPS_PER_DEG[NUM_AXES] = {
 // Acceleration is the parameter that stops the arm from grinding. Without a
 // ramp, J2 (25:1) was asked to jump from standstill to 125-250 RPM at the
 // motor, far above the pull-in torque of a loaded NEMA17, which loses steps and
-// makes the noise. These values ramp J2 to its full 40 deg/s in 0.4 s
-// (40 / 100), which is the same ramp time the bring-up values had at a quarter
-// the speed - the tuning round bought speed, not a harsher start.
+// makes the noise. These values ramp J2 to its full 90 deg/s in 0.3 s
+// (90 / 300) - nine times the speed the bring-up values reached, in three
+// quarters of the time.
 //
 // Tune upward only while listening to the arm. If a joint knocks on starting or
 // stopping, its acceleration is too high for the load.
 
-// Tuned by ear on the arm, one axis at a time, raising speed and acceleration
-// together until a joint made a noise. Roughly four times the bring-up values
-// they replace, which were set deliberately low after the arm stalled on its
+// Tuned by ear on the arm over two rounds, one axis at a time, raising speed
+// and acceleration together until a joint made a noise. Eight times the
+// bring-up values they replace, which were set low after the arm stalled on its
 // first run and were never meant to stand.
 //
-// !! Five of the six axes reached the TUNING_MAX ceiling below without ever
+// !! Every axis reached the TUNING_MAX ceiling in both rounds without ever
 // !! complaining, so these are NOT the limits of the arm -- they are the limits
-// !! of what has been tried. The margin above them is unknown, because nothing
-// !! was ever pushed to the point of failing. Only J5 stopped short of the
-// !! ceiling, at 94 deg/s.
+// !! of what has been tried, twice. The usual 20% back-off from a found limit
+// !! was never taken, because no limit was ever found.
 // !!
-// !! That matters for a warm motor, a sagging supply and a payload, none of
-// !! which were present when these were found. Treat them as tested-silent, not
-// !! as safe-with-margin, until a second tuning round finds where each axis
-// !! actually breaks and these come back down 20% from there.
+// !! Held here on purpose rather than pushed further: this is fast enough for
+// !! the work, and an axis that has never been heard to fail is one whose margin
+// !! nobody knows. The ceilings below stay above these so a third round needs no
+// !! re-flash.
+// !!
+// !! What is not covered: a warm motor, a sagging supply and a payload, none of
+// !! which were present while tuning. J4 and J5 in particular were tuned cold
+// !! and already run hot -- see docs/HARDWARE.md.
 const float MAX_JOINT_SPEED[NUM_AXES] = {
-  60.0f,   // J1  deg/s  ->  63 RPM at the motor
-  40.0f,   // J2         -> 167 RPM
-  60.0f,   // J3         ->  56 RPM
-  90.0f,   // J4         ->  44 RPM
-  94.0f,   // J5         ->  53 RPM  (the only axis that stopped below the ceiling)
-  180.0f   // J6         ->  30 RPM
+  120.0f,  // J1  deg/s  -> 125 RPM at the motor,  6667 steps/s
+  90.0f,   // J2         -> 375 RPM,              20000 steps/s  (the fastest)
+  120.0f,  // J3         -> 113 RPM,               6000 steps/s
+  180.0f,  // J4         ->  87 RPM,               4655 steps/s
+  200.0f,  // J5         -> 113 RPM,               6026 steps/s
+  360.0f   // J6         ->  60 RPM,               3200 steps/s
 };
 
 const float MAX_JOINT_ACCEL[NUM_AXES] = {
-  150.0f,  // J1  deg/s^2
-  100.0f,  // J2  carries the whole arm, so the gentlest ramp
-  150.0f,  // J3
-  250.0f,  // J4
-  300.0f,  // J5
-  400.0f   // J6
+  400.0f,  // J1  deg/s^2
+  300.0f,  // J2  carries the whole arm, so the gentlest ramp
+  400.0f,  // J3
+  600.0f,  // J4
+  700.0f,  // J5
+  1000.0f  // J6
 };
 
 // Ceiling for runtime tuning, per axis.
@@ -205,24 +208,27 @@ const float MAX_JOINT_ACCEL[NUM_AXES] = {
 // to do. These are the hard bound on what tuning may ask for, so a mistyped
 // figure cannot send an axis somewhere nothing has ever tested.
 //
-// Raised to roughly twice the working values after the first tuning round hit
-// the previous ceiling on five axes out of six. A ceiling that is reached is
-// not measuring the arm, it is measuring itself.
+// Held at 1.5x the working values. Two tuning rounds have now ended with every
+// axis sitting on this ceiling rather than on a noise, so its only real job is
+// to leave a third round somewhere to go without a re-flash. Kept deliberately
+// narrow for that reason: a wide ceiling above values nobody has heard fail is
+// an invitation, not a safeguard.
 //
-// Sanity-checked two ways, because a ceiling nobody can reach is only useful if
-// asking for it cannot break something:
+// Sanity-checked two ways, because a ceiling is only useful if asking for it
+// cannot break something:
 //
-//   step rate   the fastest is J2 at 20000 steps/s, against the 50 kHz the ISR
-//               can emit per axis (STEP_ISR_HZ / 2). Well clear.
-//   motor rate  the fastest is J2 at 375 RPM through its 25:1 reduction. High
-//               for a loaded NEMA17 and not expected to be reachable - that is
-//               what the tuning round is for - but not absurd at 24 V.
+//   step rate   the fastest is J2 at 30000 steps/s, against the 50 kHz the ISR
+//               can emit per axis (STEP_ISR_HZ / 2). Clear, with the margin
+//               narrowing - a fourth round would want this checked again.
+//   motor rate  the fastest is J2 at 563 RPM through its 25:1 reduction. That
+//               is past where a NEMA17 holds much torque, so J2 is the axis
+//               most likely to find its limit first, which is the point.
 //
 // !! Past what an axis can hold, a stepper loses steps silently. Nothing detects
 // !! it: the position report keeps counting and stops matching the arm. After a
 // !! tuning run that produced grinding, re-home before trusting a position.
-const float TUNING_MAX_SPEED[NUM_AXES] = {120.0f, 90.0f, 120.0f, 180.0f, 200.0f, 360.0f};
-const float TUNING_MAX_ACCEL[NUM_AXES] = {400.0f, 300.0f, 400.0f, 600.0f, 700.0f, 1000.0f};
+const float TUNING_MAX_SPEED[NUM_AXES] = {180.0f, 135.0f, 180.0f, 270.0f, 300.0f, 540.0f};
+const float TUNING_MAX_ACCEL[NUM_AXES] = {600.0f, 450.0f, 600.0f, 900.0f, 1000.0f, 1500.0f};
 
 // Default speed used when the host does not specify one.
 const float DEFAULT_SPEED = 8.0f;  // deg/s
@@ -240,8 +246,9 @@ const float DEFAULT_SPEED = 8.0f;  // deg/s
 // A step occupies two ticks (one high, one low), so the ceiling on the step
 // rate is STEP_ISR_HZ / 2, per axis - each axis has its own step pin and the
 // Bresenham distribution can fire all six on the same tick. The fastest axis is
-// J2 at 8889 steps/s working, 20000 at its tuning ceiling, so there is plenty
-// of headroom either way.
+// J2 at 20000 steps/s working, 30000 at its tuning ceiling, so there is
+// headroom either way - but less than there was, and worth re-checking before
+// J2 is raised again.
 const uint32_t STEP_ISR_HZ = 100000;
 
 // Slowest rate the profile is allowed to command, in step events per second.

@@ -154,18 +154,27 @@ fiction.
 
 - [x] J1  - [x] J2  - [x] J3  - [x] J4  - [x] J5  - [x] J6
 
-**Result of the first round**, and the values now in `config.h`:
+**Result after two rounds**, and the values now in `config.h`:
 
 | | J1 | J2 | J3 | J4 | J5 | J6 |
 |---|---|---|---|---|---|---|
-| speed °/s | 60 | 40 | 60 | 90 | 94 | 180 |
-| accel °/s² | 150 | 100 | 150 | 250 | 300 | 400 |
+| speed °/s | 120 | 90 | 120 | 180 | 200 | 360 |
+| accel °/s² | 400 | 300 | 400 | 600 | 700 | 1000 |
+| at the motor | 125 RPM | 375 RPM | 113 RPM | 87 RPM | 113 RPM | 60 RPM |
 
-> **These are tested-silent, not safe-with-margin.** Five of the six axes reached
-> `TUNING_MAX_*` without ever complaining, so the round measured the ceiling
-> rather than the arm and the 20% margin above was never taken. Only J5 stopped
-> short, at 94 °/s. The ceilings have since been doubled; a second round should
-> find where each axis actually breaks.
+Eight times the bring-up values. Round one ended with five axes on the ceiling
+and J5 at 94 °/s; the ceilings were doubled, and round two ended with all six on
+the ceiling again.
+
+> **These are tested-silent, not safe-with-margin.** Every axis reached
+> `TUNING_MAX_*` in both rounds without ever making a noise, so both rounds
+> measured the ceiling rather than the arm, and the 20% back-off from a found
+> limit was never taken — nothing was ever found. Held here deliberately: this is
+> fast enough for the work, and the ceilings sit 1.5× above so a third round
+> needs no re-flash.
+>
+> What is not covered: a warm motor, a sagging supply, a payload. See the J4/J5
+> note in [HARDWARE.md](HARDWARE.md#still-open).
 
 Check `Vref` on each driver (~0.6–1.0 V depending on the motor) before blaming
 acceleration for a joint that loses steps under load. J4 and J5 run hot — see

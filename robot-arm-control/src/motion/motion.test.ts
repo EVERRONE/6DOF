@@ -68,8 +68,8 @@ describe('motion limits mirror the firmware', () => {
     // firmware/config.h exactly - if the solver plans in a faster box than the
     // firmware will execute, the firmware silently scales the move down and the
     // arm arrives late relative to everything the app thinks it timed.
-    expect(JOINT_MAX_SPEED_DEG_S).toEqual([60, 40, 60, 90, 94, 180]);
-    expect(JOINT_MAX_ACCEL_DEG_S2).toEqual([150, 100, 150, 250, 300, 400]);
+    expect(JOINT_MAX_SPEED_DEG_S).toEqual([120, 90, 120, 180, 200, 360]);
+    expect(JOINT_MAX_ACCEL_DEG_S2).toEqual([400, 300, 400, 600, 700, 1000]);
   });
 });
 
@@ -179,14 +179,34 @@ describe('joint-space interpolation', () => {
     const start = [...HOME_POSE_DEG];
     const end = [0, 45, 55, 129, 131, 0];
 
-    // Both speeds have to sit below the axis limit, or the planner clamps them
-    // to the same value and the comparison proves nothing. J2 is the only joint
-    // that moves here, so scale off its limit instead of hardcoding a figure -
-    // hardcoded speeds silently stopped testing anything when the bring-up
-    // values were lowered.
-    const j2Limit = JOINT_MAX_SPEED_DEG_S[1];
-    const fast = interp.interpolateJointSpace(start, end, j2Limit * 0.8, 120, 10);
-    const slow = interp.interpolateJointSpace(start, end, j2Limit * 0.2, 120, 10);
+    // Both speeds have to sit below every moving joint's limit, or the planner
+    // clamps them and the comparison proves nothing. J2, J3 and J4 all move
+    // here; J2 has the lowest limits of the three, so scaling off those keeps
+    // both requests under all of them. Scaled rather than written out, because
+    // hardcoded numbers silently stopped testing anything when the bring-up
+    // values were lowered, and again when the tuning round raised them.
+    //
+    // The acceleration has to come from the model for the same reason. Left at a
+    // literal 120, it fell below J2's limit once that reached 300, and then both
+    // profiles were acceleration-limited: the faster one ran a triangle that
+    // never reached the speed being requested, so the test was comparing two
+    // acceleration limits rather than two speed limits.
+    const requestedFast = JOINT_MAX_SPEED_DEG_S[1] * 0.8;
+    const requestedSlow = JOINT_MAX_SPEED_DEG_S[1] * 0.2;
+    const accel = JOINT_MAX_ACCEL_DEG_S2[1];
+
+    const fast = interp.interpolateJointSpace(start, end, requestedFast, accel, 10);
+    const slow = interp.interpolateJointSpace(start, end, requestedSlow, accel, 10);
+
+    // Guard the premise: if the faster profile never reaches the speed it was
+    // given, the comparison below is measuring something else. The requested
+    // speed applies to the joint with the largest displacement - J4 here, at 36
+    // degrees against J2's 30 - so it is the fastest joint that should hit it,
+    // not any particular one.
+    const peak = Math.max(
+      ...fast.points.flatMap(p => (p.velocity ?? []).map(Math.abs))
+    );
+    expect(peak).toBeCloseTo(requestedFast, 6);
 
     expect(slow.duration).toBeGreaterThan(fast.duration * 2);
   });

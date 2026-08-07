@@ -66,19 +66,30 @@ export const TuningPanel: React.FC = () => {
     const hi = JOINT_LIMITS_DEG.max[axis];
     const travel = hi - lo;
 
-    const wanted = accel > 0 ? (2 * speed * speed) / accel : travel;
+    const available = travel * 0.8;
+    // Two ramps cover v^2/a between them. Below that the move is triangular and
+    // never reaches the speed being asked for at all.
+    const toReachCruise = accel > 0 ? (speed * speed) / accel : travel;
+    // Twice that leaves about half the move at constant speed, which is what
+    // makes cruise audible as its own phase.
+    const wanted = 2 * toReachCruise;
+
     // Never more than 80% of travel, so the ends stay clear, and never so short
     // that the move is over before anything can be heard.
-    const span = Math.max(Math.min(wanted, travel * 0.8), Math.min(10, travel * 0.8));
+    const span = Math.max(Math.min(wanted, available), Math.min(10, available));
     const mid = (lo + hi) / 2;
 
     return {
       from: mid - span / 2,
       to: mid + span / 2,
       span,
-      // True when the joint runs out of room before it can reach the speed being
-      // asked for, so "grinding in the middle" is not a verdict available here.
-      clipped: wanted > travel * 0.8
+      // True only when the joint runs out of room before it can reach the
+      // commanded speed - then "grinding in the middle" is not a verdict
+      // available here, because there is no middle. A sweep that merely has
+      // less cruise than we would like still tests the speed, so it is not
+      // flagged: crying wolf on the geared joints, whose travel is short, would
+      // make the warning worth ignoring.
+      clipped: toReachCruise > available
     };
   };
 

@@ -163,15 +163,15 @@ export const JOINT_LIMITS_RAD = {
  * estimates and path preview match what the arm actually does. Change them in
  * both places together; a test asserts these exact values.
  */
-// Tuned by ear on the arm and mirrored from MAX_JOINT_SPEED / MAX_JOINT_ACCEL
-// in firmware/config.h, replacing the bring-up values that were about a quarter
-// of these.
+// Tuned by ear on the arm over two rounds and mirrored from MAX_JOINT_SPEED /
+// MAX_JOINT_ACCEL in firmware/config.h, replacing the bring-up values that were
+// an eighth of these.
 //
-// These are tested-silent, not safe-with-margin: five of the six axes reached
-// the tuning ceiling without complaining, so how much is left above them is not
-// known. See the note in config.h.
-export const JOINT_MAX_SPEED_DEG_S: number[] = [60, 40, 60, 90, 94, 180];
-export const JOINT_MAX_ACCEL_DEG_S2: number[] = [150, 100, 150, 250, 300, 400];
+// These are tested-silent, not safe-with-margin: every axis reached the tuning
+// ceiling in both rounds without complaining, so how much is left above them is
+// not known. Held here on purpose. See the note in config.h.
+export const JOINT_MAX_SPEED_DEG_S: number[] = [120, 90, 120, 180, 200, 360];
+export const JOINT_MAX_ACCEL_DEG_S2: number[] = [400, 300, 400, 600, 700, 1000];
 
 /**
  * Post-homing rest pose in degrees, from firmware/config.h POST_HOME_ANGLES.

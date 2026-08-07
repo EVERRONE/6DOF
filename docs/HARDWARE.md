@@ -323,13 +323,13 @@ motion. Reduce and watch for lost steps.
 For reference, a stepper at rated current normally reaches 60–80 °C, which feels
 alarming but is not a fault.
 
-**This got more urgent with the tuning round.** J4 and J5 went from 20 and
-30 deg/s to 90 and 94, and from 60 and 75 deg/s² to 250 and 300 — the largest
-increases on the arm, on its two smallest and hottest motors. A stepper's
-available torque falls as it heats, and these were tuned cold, so the quiet
-values found in that session are the ones least likely to survive a long run.
-The margin above them was never established, because both axes hit the tuning
-ceiling rather than a noise. If either starts losing steps after twenty minutes
+**This got more urgent with the tuning rounds.** J4 and J5 went from 20 and
+30 deg/s to 180 and 200, and from 60 and 75 deg/s² to 600 and 700 — nine times
+the speed and ten times the acceleration, on the arm's two smallest and hottest
+motors. A stepper's available torque falls as it heats, and both rounds were run
+cold, so these are the values least likely to survive a long run. The margin
+above them was never established, because both axes hit the tuning ceiling
+rather than a noise, twice. If either starts losing steps after twenty minutes
 of running, this is the first place to look, not the acceleration.
 
 ### URDF angles vs firmware angles — anchor RESOLVED, signs NOT
