@@ -1240,6 +1240,21 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       return;
     }
 
+    // Same refusal a single Cartesian move makes, for the same reason: two
+    // samples 2 mm apart with the arm somewhere else entirely between them. The
+    // tool pose is right at both and unconstrained through the jump.
+    const jump = trajectory.discontinuity;
+    if (jump) {
+      get().logEvent(
+        'error',
+        `Refusing to run the path: J${jump.axis + 1} jumps ${jump.degrees.toFixed(0)}° ` +
+          `between two samples in segment ${jump.segment + 1}, ${jump.atPercent}% along it. ` +
+          'The arm is reconfiguring through a singularity — move J5 away from 131°, ' +
+          'or plan this stretch in joint mode.'
+      );
+      return;
+    }
+
     // Set up abort controller
     executionAbortController = new AbortController();
     executionPaused = false;
@@ -1263,9 +1278,35 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const startTime = Date.now();
     const loopCount = get().plannerConfig.loopCount;
     const iterations = loopCount > 0 ? loopCount : 1;
-    const speed = get().plannerConfig.maxJointSpeed;
 
     const aborted = () => executionAbortController?.signal.aborted ?? true;
+
+    /**
+     * Speed to send with one point: the joint travel it costs, over the time the
+     * planner allotted it.
+     *
+     * One figure for the whole path cannot deliver the requested tool speed. On a
+     * linear path the samples are evenly spaced in Cartesian space and wildly
+     * uneven in joint space - measured on a 150 mm line, between 0.538 and 1.872
+     * degrees of joint travel per 2 mm step - so a constant joint speed makes the
+     * tool travel 3.5 times faster at one end of the move than the other. The
+     * arm's own limits still cap it; this only stops the host asking for the
+     * wrong thing.
+     */
+    const speedFor = (index: number): number => {
+      if (index <= 0) return DEFAULT_PLANNER_CONFIG.defaultSpeed;
+      const dt = allPoints[index].time - allPoints[index - 1].time;
+      if (!(dt > 1e-6)) return DEFAULT_PLANNER_CONFIG.defaultSpeed;
+
+      let travel = 0;
+      for (let j = 0; j < NUM_JOINTS; j++) {
+        travel = Math.max(
+          travel,
+          Math.abs(allPoints[index].jointAngles[j] - allPoints[index - 1].jointAngles[j])
+        );
+      }
+      return travel / dt;
+    };
 
     // Deliberately does not touch robotState. The firmware's STATUS line is the
     // authority on that, and setting it here raced an emergency stop: the sender
@@ -1289,7 +1330,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
      * trajectory and kept the queue shallow, so the arm restarted from a standstill
      * at every point.
      */
-    const sendPoint = (angles: JointAngles): Promise<SendOutcome> =>
+    const sendPoint = (angles: JointAngles, speed: number): Promise<SendOutcome> =>
       // A full queue can hold the sender for seconds, so both the abort and the
       // pause have to be observed inside the retry loop. Checking only at the top
       // of the outer loop left the pause button doing nothing until the queue
@@ -1343,17 +1384,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
             // Nothing is skipped: this point has not been sent yet.
           }
 
-          const point = allPoints[i];
-          const angles: JointAngles = {
-            J1: point.jointAngles[0],
-            J2: point.jointAngles[1],
-            J3: point.jointAngles[2],
-            J4: point.jointAngles[3],
-            J5: point.jointAngles[4],
-            J6: point.jointAngles[5]
-          };
-
-          const outcome = await sendPoint(angles);
+          const outcome = await sendPoint(
+            toJointAngles(allPoints[i].jointAngles),
+            speedFor(i)
+          );
 
           if (outcome === 'aborted') {
             stopAndReset();

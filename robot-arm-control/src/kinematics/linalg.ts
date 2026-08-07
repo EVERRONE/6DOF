@@ -255,6 +255,136 @@ export function rotationLog(R: number[][]): Vector3 {
 }
 
 // ---------------------------------------------------------------------------
+// Quaternions, for interpolating between orientations
+// ---------------------------------------------------------------------------
+//
+// Interpolating a rotation is the one job Euler angles cannot do. Averaging two
+// rpy triples does not give a rotation halfway between them: the triples wrap at
+// +/-pi, so a pair either side of the wrap averages to the opposite of what was
+// meant, and near gimbal lock two very different triples describe nearly the
+// same rotation. A quaternion has neither problem, and slerp traces the shortest
+// rotation between two attitudes at a constant angular rate - which is what a
+// tool changing attitude along a path should do.
+
+export interface Quaternion {
+  w: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
+/**
+ * Rotation matrix to unit quaternion, by Shepperd's method.
+ *
+ * The naive formula divides by sqrt(1 + trace), which loses precision as the
+ * trace approaches -1 and fails outright at a 180 degree rotation. Pivoting on
+ * whichever of the four components is largest keeps every division well
+ * conditioned over the whole range.
+ */
+export function matrixToQuat(R: number[][]): Quaternion {
+  const trace = R[0][0] + R[1][1] + R[2][2];
+
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2;
+    return {
+      w: s / 4,
+      x: (R[2][1] - R[1][2]) / s,
+      y: (R[0][2] - R[2][0]) / s,
+      z: (R[1][0] - R[0][1]) / s
+    };
+  }
+
+  if (R[0][0] > R[1][1] && R[0][0] > R[2][2]) {
+    const s = Math.sqrt(1 + R[0][0] - R[1][1] - R[2][2]) * 2;
+    return {
+      w: (R[2][1] - R[1][2]) / s,
+      x: s / 4,
+      y: (R[0][1] + R[1][0]) / s,
+      z: (R[0][2] + R[2][0]) / s
+    };
+  }
+
+  if (R[1][1] > R[2][2]) {
+    const s = Math.sqrt(1 + R[1][1] - R[0][0] - R[2][2]) * 2;
+    return {
+      w: (R[0][2] - R[2][0]) / s,
+      x: (R[0][1] + R[1][0]) / s,
+      y: s / 4,
+      z: (R[1][2] + R[2][1]) / s
+    };
+  }
+
+  const s = Math.sqrt(1 + R[2][2] - R[0][0] - R[1][1]) * 2;
+  return {
+    w: (R[1][0] - R[0][1]) / s,
+    x: (R[0][2] + R[2][0]) / s,
+    y: (R[1][2] + R[2][1]) / s,
+    z: s / 4
+  };
+}
+
+/** Unit quaternion to rotation matrix. */
+export function quatToMatrix(q: Quaternion): number[][] {
+  const n = Math.hypot(q.w, q.x, q.y, q.z) || 1;
+  const w = q.w / n, x = q.x / n, y = q.y / n, z = q.z / n;
+
+  return [
+    [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+    [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+    [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]
+  ];
+}
+
+/**
+ * Spherical linear interpolation, taking the short way round.
+ *
+ * q and -q are the same rotation, so a pair whose dot product is negative would
+ * otherwise be interpolated the long way - up to 360 degrees of travel to reach
+ * an attitude a few degrees away. Negating one of them first is what makes this
+ * the *shortest* path rather than merely a path.
+ *
+ * Falls back to normalised linear interpolation when the two are nearly
+ * parallel, where sin(theta) approaches zero and the division loses meaning. The
+ * two agree to well inside a rotation's useful precision at that separation.
+ */
+export function slerp(a: Quaternion, b: Quaternion, t: number): Quaternion {
+  let dot = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+
+  let end = b;
+  if (dot < 0) {
+    end = { w: -b.w, x: -b.x, y: -b.y, z: -b.z };
+    dot = -dot;
+  }
+
+  if (dot > 0.9995) {
+    const w = a.w + (end.w - a.w) * t;
+    const x = a.x + (end.x - a.x) * t;
+    const y = a.y + (end.y - a.y) * t;
+    const z = a.z + (end.z - a.z) * t;
+    const n = Math.hypot(w, x, y, z) || 1;
+    return { w: w / n, x: x / n, y: y / n, z: z / n };
+  }
+
+  const theta = Math.acos(Math.min(1, dot));
+  const sinTheta = Math.sin(theta);
+  const ka = Math.sin((1 - t) * theta) / sinTheta;
+  const kb = Math.sin(t * theta) / sinTheta;
+
+  return {
+    w: ka * a.w + kb * end.w,
+    x: ka * a.x + kb * end.x,
+    y: ka * a.y + kb * end.y,
+    z: ka * a.z + kb * end.z
+  };
+}
+
+/** Angle between two orientations, in radians. */
+export function angleBetweenQuat(a: Quaternion, b: Quaternion): number {
+  const dot = Math.abs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z);
+  return 2 * Math.acos(Math.min(1, dot));
+}
+
+// ---------------------------------------------------------------------------
 // Dense linear algebra on small matrices
 // ---------------------------------------------------------------------------
 

@@ -13,7 +13,7 @@ import { useRobotStore } from './robotStore';
 import { SerialManager } from '../communication/SerialManager';
 import { ConnectionStatus, RobotState } from '../types/robot';
 import { ExecutionState, Waypoint } from '../motion/types';
-import { TrajectoryPlanner } from '../motion/TrajectoryPlanner';
+import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG } from '../motion/TrajectoryPlanner';
 import { rotationLog, multiply3, transpose3 } from '../kinematics/linalg';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { JOINT_LIMITS_DEG, HOME_POSE_DEG, degToRad } from '../kinematics/robotModel';
@@ -55,13 +55,30 @@ async function connectStore(
   return { port, manager };
 }
 
-/** The `J` commands the currently planned trajectory should produce, in order. */
+/**
+ * The `J` commands the currently planned trajectory should produce, in order.
+ *
+ * The speed is per point - the joint travel that point costs over the time the
+ * planner allotted it - because one figure for the whole path cannot deliver a
+ * constant tool speed. Derived here the same way the sender derives it, so this
+ * checks the angles and the ordering rather than restating the arithmetic.
+ */
 function plannedCommands(): string[] {
   const trajectory = useRobotStore.getState().trajectory!;
-  const speed = useRobotStore.getState().plannerConfig.maxJointSpeed;
+  const points = TrajectoryPlanner.flattenTrajectory(trajectory);
 
-  return TrajectoryPlanner.flattenTrajectory(trajectory).map(point => {
+  return points.map((point, i) => {
     const angles = point.jointAngles.map(v => v.toFixed(3)).join(' ');
+
+    let speed = DEFAULT_PLANNER_CONFIG.defaultSpeed;
+    if (i > 0) {
+      const dt = point.time - points[i - 1].time;
+      if (dt > 1e-6) {
+        speed = Math.max(
+          ...point.jointAngles.map((v, j) => Math.abs(v - points[i - 1].jointAngles[j]))
+        ) / dt;
+      }
+    }
     return `J ${angles} ${speed.toFixed(2)}`;
   });
 }

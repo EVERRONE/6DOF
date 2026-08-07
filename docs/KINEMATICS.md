@@ -448,24 +448,34 @@ fast path. `moveAlongLine` refuses on it and says where. A joint-space move to
 the same destination is unaffected and still works: the destination is reachable
 with the orientation held, it is getting there in a straight line that is not.
 
-**What it does not do.** Nothing resolves the singularity. Three things were
-tried and measured on the 100 mm move above, and none worked:
+**What it does not do.** Nothing resolves the singularity. Four things were
+tried and measured on the 100 mm move above, against a 44.1° baseline:
 
 | Attempt | Result |
 |---------|--------|
 | Shorter trust region (`maxStepRad` 0.35 → 0.02) | 53.0° — worse |
 | Single seed, no restarts | 44.1° — unchanged |
-| Seed bias `μ‖q − q_seed‖²` in the normal equations | 470° at μ=1e-4, no convergence at μ=1e-3 |
+| Seed bias `μ‖q − anchor‖²` in the step only | 470° at μ=1e-4; no convergence at 1e-3 |
+| …with the accept test minimising the same augmented cost | 45.5° at μ=1e-4; 459° at 1e-3; no convergence above |
 
-The seed bias failed because the LM acceptance test compares the *task* cost
-while the step minimises the *augmented* cost, so the two disagree about which
-steps are progress. Making that work means the accept test has to minimise the
-same objective the step does — a solver change, not a parameter.
+The third attempt failed because Levenberg–Marquardt's acceptance test compared
+the *task* cost while the step minimised the *augmented* cost, so the two
+disagreed about which steps were progress. The fourth fixed that — and barely
+moved the number. The reason is more basic: the weight that suppresses a free 22°
+swap is the same order as the weight that stops the solver reaching the target at
+all. There is no window between them.
 
-The practical answer for now is to move J5 5–20° off 131° before asking for
-orientation-held linear motion. A proper fix is singularity-robust IK: lock the
-redundant joint when the wrist degenerates, or carry an explicit null-space
-objective through both the step and the accept test.
+**A weighting cannot fix a rank deficiency that is exact rather than
+approximate.** The determinant is 2.5 × 10⁻¹⁷, not merely small — J4 and J6 are
+*the same axis*, and no amount of penalty makes a direction that does not exist
+reappear. The fix is to remove the redundant freedom instead: when J5 comes
+within a threshold of the singular value, lock J4 and solve on five joints. That
+is what industrial controllers do, and it is deterministic rather than tuned.
+
+Until then, the practical answer is to move J5 5–20° off 131° before asking for
+orientation-held linear motion, and the code refuses rather than thrashing:
+`moveAlongLine` on the discontinuity, and `executeTrajectory` on
+`Trajectory.discontinuity`, which aggregates the first jump across all segments.
 
 ---
 

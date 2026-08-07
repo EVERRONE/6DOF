@@ -340,22 +340,54 @@ export const PathPlannerPanel: React.FC = () => {
             </div>
           </div>
 
-          {/* Max joint speed */}
+          {/* Speed override. A fraction of each joint's own limit rather than an
+              absolute deg/s: one figure cannot describe six joints whose limits
+              differ by 4x, and the absolute cap this replaced went stale the
+              moment the arm was tuned, holding J6 to 17% of its measured speed. */}
           <div>
-            <label className="text-xs text-gray-500">Joint Speed</label>
+            <label className="text-xs text-gray-500">Speed</label>
+            <div className="flex items-center gap-1">
+              <input
+                type="range"
+                value={Math.round(plannerConfig.speedScale * 100)}
+                onChange={(e) => updatePlannerConfig({
+                  speedScale: Math.max(0.05, Math.min(1, Number(e.target.value) / 100))
+                })}
+                disabled={isExecuting}
+                className="w-full"
+                min={5}
+                max={100}
+                step={5}
+              />
+              <span className="text-xs text-gray-400 whitespace-nowrap w-10 text-right">
+                {Math.round(plannerConfig.speedScale * 100)}%
+              </span>
+            </div>
+          </div>
+
+          {/* Corner rounding. Two linear segments meeting at a right angle stop
+              dead, because carrying speed round a corner needs a step change in
+              a joint's velocity. An arc tangent to both removes the corner. */}
+          <div>
+            <label className="text-xs text-gray-500">Corner rounding</label>
             <div className="flex items-center gap-1">
               <input
                 type="number"
-                value={plannerConfig.maxJointSpeed}
+                value={Math.round(plannerConfig.blendRadius * 1000)}
                 onChange={(e) => updatePlannerConfig({
-                  maxJointSpeed: Math.max(1, parseInt(e.target.value) || 60)
+                  blendRadius: Math.max(0, Math.min(100, parseInt(e.target.value) || 0)) / 1000
                 })}
-                disabled={isExecuting}
+                disabled={isExecuting || plannerConfig.interpolationMode !== 'linear'}
                 className="w-full text-sm border rounded px-2 py-1"
-                min={1}
-                max={180}
+                min={0}
+                max={100}
+                title={
+                  plannerConfig.interpolationMode === 'linear'
+                    ? 'Radius of the arc that replaces each corner. The path cuts the corner by up to this much. 0 runs them square, stopping at each one.'
+                    : 'Linear mode only — a joint-space path has no Cartesian corner to round'
+                }
               />
-              <span className="text-xs text-gray-400 whitespace-nowrap">deg/s</span>
+              <span className="text-xs text-gray-400 whitespace-nowrap">mm</span>
             </div>
           </div>
 

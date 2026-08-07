@@ -124,6 +124,17 @@ export interface Trajectory {
   unreachableSamples: number;
   /** Waypoints that could not be resolved at all, and were left out of the plan. */
   skippedWaypoints: string[];
+  /**
+   * The first place the joint path jumps, across the whole trajectory, or null.
+   *
+   * Segments have carried this since linear moves learned to detect it, but the
+   * trajectory did not surface it and execution did not read it - so a path could
+   * run straight through a 44 degree wrist flip that a single Cartesian move to
+   * the same place refuses.
+   */
+  discontinuity?:
+    | (NonNullable<TrajectorySegment['discontinuity']> & { segment: number })
+    | null;
 }
 
 /**
@@ -164,10 +175,40 @@ export interface PathPlannerConfig {
   interpolationMode: InterpolationMode;
   defaultSpeed: number;           // mm/s
   defaultAcceleration: number;    // mm/s²
-  maxJointSpeed: number;          // deg/s
-  maxJointAcceleration: number;   // deg/s²
   pointsPerSecond: number;        // trajectory sampling rate (Hz)
   loopCount: number;              // 0 = no loop, >0 = repeat N times
+
+  /**
+   * Global override on how fast the path runs, as a fraction of what each joint
+   * can do. 1 is full speed.
+   *
+   * Replaces a pair of absolute caps - `maxJointSpeed: 60` and
+   * `maxJointAcceleration: 120` - which were a second set of limits alongside
+   * the per-joint ones in the model, and went stale the moment the arm was
+   * tuned. They held J6 to 17% of its measured speed and J5 to 30%, silently,
+   * because a single figure cannot describe six joints that differ by 4x.
+   *
+   * A scale cannot go stale: it is relative to whatever the joints can do today.
+   * It is also what an operator actually wants at the panel - "run this at half
+   * speed while I watch it" - which is why every industrial controller has one.
+   */
+  speedScale: number;
+
+  /**
+   * Radius of the arc that replaces a corner between two linear segments, in
+   * metres. Zero runs the corners square.
+   *
+   * A path through a sharp corner has to stop there: carrying speed round it
+   * would need a step change in a joint's velocity, so the firmware's junction
+   * rule takes the speed to zero. Two linear segments meeting at a right angle
+   * cost a full stop, every lap. Replacing the corner with an arc tangent to
+   * both segments removes the discontinuity, and the arm runs through.
+   *
+   * The trade is that the path no longer passes through the waypoint - it cuts
+   * the corner by up to the radius. Named for what it is, rather than
+   * "zone" (ABB) or "CNT" (Fanuc), but it is the same idea.
+   */
+  blendRadius: number;
 
   /**
    * Hold the tool's orientation for the whole path.
@@ -175,6 +216,10 @@ export interface PathPlannerConfig {
    * The orientation held is the one the arm starts the path in. Without it a
    * path solves for position alone and the wrist tips as the arm reaches -
    * fine for moving, useless for carrying a pen or a gripper.
+   *
+   * Orthogonal to per-waypoint orientations: this fills every waypoint with the
+   * starting one, so the interpolation below has nothing to do. Waypoints that
+   * carry their own orientations are blended between instead.
    */
   holdToolOrientation: boolean;
 }

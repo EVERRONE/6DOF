@@ -11,8 +11,23 @@ import {
 } from './types';
 import { PathInterpolator } from './PathInterpolator';
 import { pointOnCircle } from './Shapes';
+import { blendPolyline } from './CornerBlend';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
-import { Vector3 } from '../kinematics/types';
+import { Rotation3, Vector3 } from '../kinematics/types';
+import { matrixToQuat, matrixToRpy, quatToMatrix, rpyToMatrix, slerp } from '../kinematics/linalg';
+
+/** Slerp between two attitudes, tolerating either being absent. */
+function blendRotation(
+  a: Rotation3 | undefined,
+  b: Rotation3 | undefined,
+  t: number
+): Rotation3 | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return matrixToRpy(
+    quatToMatrix(slerp(matrixToQuat(rpyToMatrix(a)), matrixToQuat(rpyToMatrix(b)), t))
+  );
+}
 
 /**
  * Default planner configuration
@@ -21,10 +36,16 @@ export const DEFAULT_PLANNER_CONFIG: PathPlannerConfig = {
   interpolationMode: 'joint',
   defaultSpeed: 50,           // 50 mm/s
   defaultAcceleration: 100,   // 100 mm/s²
-  maxJointSpeed: 60,          // 60 deg/s
-  maxJointAcceleration: 120,  // 120 deg/s²
   pointsPerSecond: 10,        // 10 Hz trajectory sampling
   loopCount: 0,
+  // Full speed, meaning whatever each joint's own measured limit is. The pair of
+  // absolute caps this replaces - 60 deg/s and 120 deg/s^2 - were a second set
+  // of limits alongside the model's, and went stale when the arm was tuned: they
+  // held J6 to 17% of its measured speed and J5 to 30%.
+  speedScale: 1,
+  // Square corners by default, because cutting one changes where the arm goes
+  // and that should be asked for rather than assumed.
+  blendRadius: 0,
   holdToolOrientation: false
 };
 
@@ -97,10 +118,32 @@ export class TrajectoryPlanner {
       return { ...this.createEmptyTrajectory(waypoints), skippedWaypoints };
     }
 
+    // A linear path whose corners are to be rounded is planned as a whole rather
+    // than waypoint by waypoint: a blend arc straddles a waypoint, taking a bite
+    // out of the legs either side, so neither leg can be planned without knowing
+    // about the other.
+    if (
+      this.config.interpolationMode === 'linear' &&
+      this.config.blendRadius > 1e-9 &&
+      resolvedWaypoints.length >= 2 &&
+      !resolvedWaypoints.some(w => w.shape)
+    ) {
+      return this.planBlended(waypoints, resolvedWaypoints, startAngles, heldOrientation);
+    }
+
     // Plan segments between consecutive waypoints
     const segments: TrajectorySegment[] = [];
     let segStartAngles = [...startAngles];
     let timeOffset = 0;
+
+    // The attitude the previous waypoint left the tool in, so a segment turns
+    // from it rather than starting in the one it is heading for. Seeded from the
+    // pose the arm is actually in.
+    let carriedOrientation: Rotation3 | undefined =
+      heldOrientation ??
+      (resolvedWaypoints.some(w => w.orientation)
+        ? ForwardKinematics.solve(startAngles).endEffectorPose.rotation
+        : undefined);
 
     for (let i = 0; i < waypointAngles.length; i++) {
       const endAngles = waypointAngles[i];
@@ -110,39 +153,45 @@ export class TrajectoryPlanner {
       let segment: TrajectorySegment;
 
       if (this.config.interpolationMode === 'linear') {
-        // Cartesian straight-line interpolation
+        // Cartesian straight-line interpolation, turning the tool from the
+        // attitude the previous waypoint left it in to this one's. Held constant
+        // when they agree, which is what holdToolOrientation arranges.
         segment = this.interpolator.interpolateCartesianSpace(
           segStartAngles,
           waypoint.position,
-          speed,
-          this.config.defaultAcceleration,
+          speed * this.config.speedScale,
+          this.config.defaultAcceleration * this.config.speedScale,
           this.config.pointsPerSecond,
-          // Hold the tool along the line when the waypoint asks for it.
+          carriedOrientation ?? waypoint.orientation,
           waypoint.orientation
         );
+        carriedOrientation = waypoint.orientation ?? carriedOrientation;
       } else if (waypoint.shape) {
         // Getting to a figure is an ordinary move; the figure itself is not.
         // Handled below, after this approach segment.
         segment = this.interpolator.interpolateJointSpace(
           segStartAngles,
           endAngles,
-          speed,
-          this.config.maxJointAcceleration,
-          this.config.pointsPerSecond
+          Infinity,
+          Infinity,
+          this.config.pointsPerSecond,
+          this.config.speedScale
         );
       } else {
         // Joint space interpolation.
         //
-        // The waypoint's own feed rate is used here, falling back to the config
-        // default. It used to pass config.maxJointSpeed unconditionally, so the
-        // per-waypoint speed control did nothing at all in joint mode - which is
-        // the default mode.
+        // The waypoint's own feed rate is a further cap on top of the per-joint
+        // limits, not a replacement for them. It used to pass config.maxJointSpeed
+        // unconditionally, so the per-waypoint control did nothing at all in
+        // joint mode - which is the default mode - and config.maxJointSpeed then
+        // capped every joint at one figure that could not describe six of them.
         segment = this.interpolator.interpolateJointSpace(
           segStartAngles,
           endAngles,
-          Math.min(speed, this.config.maxJointSpeed),
-          this.config.maxJointAcceleration,
-          this.config.pointsPerSecond
+          speed,
+          Infinity,
+          this.config.pointsPerSecond,
+          this.config.speedScale
         );
       }
 
@@ -192,23 +241,146 @@ export class TrajectoryPlanner {
       segStartAngles = endAngles;
     }
 
-    // Compute totals
-    const totalDuration = segments.reduce((sum, s) => sum + s.duration, 0);
-    const totalDistance = segments.reduce((sum, s) => sum + s.distance, 0);
-    const pointCount = segments.reduce((sum, s) => sum + s.points.length, 0);
-    const unreachableSamples = segments.reduce(
-      (sum, s) => sum + (s.unreachableSamples ?? 0),
-      0
-    );
+    return this.summarise(segments, waypoints, skippedWaypoints);
+  }
+
+  /**
+   * Plan a linear path whose corners are replaced by tangent arcs.
+   *
+   * Kept apart from the waypoint-by-waypoint path above because the unit of
+   * planning is different. There, one segment runs from one waypoint to the
+   * next. Here the polyline is blended first and the resulting pieces - shortened
+   * legs and the arcs between them - are what get sampled, so a segment no longer
+   * corresponds to a waypoint at all. The arm never reaches the corner waypoints;
+   * it passes within `cutBy` of them.
+   *
+   * Orientation is carried along the whole path by distance rather than per
+   * segment: a blend arc straddles a waypoint, so asking "which waypoint's
+   * attitude does this piece end in" has no answer. Each waypoint is placed at
+   * its own distance along the blended path, and the attitude at any point is
+   * the slerp between the two it lies between.
+   */
+  private planBlended(
+    waypoints: Waypoint[],
+    resolved: Waypoint[],
+    startAngles: number[],
+    heldOrientation?: Rotation3
+  ): Trajectory {
+    const startPos = ForwardKinematics.position(startAngles);
+    const corners = [startPos, ...resolved.map(w => w.position)];
+    const pieces = blendPolyline(corners, this.config.blendRadius);
+
+    if (pieces.length === 0) {
+      return this.createEmptyTrajectory(waypoints);
+    }
+
+    // Where each corner sits along the blended path. A blended corner is placed
+    // at the middle of the arc that replaced it, which is the closest the path
+    // comes to it.
+    const total = pieces.reduce((sum, p) => sum + p.length, 0);
+    const cornerDistance = new Array(corners.length).fill(0);
+    let walked = 0;
+    for (const piece of pieces) {
+      if (piece.kind === 'arc') {
+        cornerDistance[piece.cornerIndex] = walked + piece.length / 2;
+      }
+      walked += piece.length;
+    }
+    cornerDistance[0] = 0;
+    cornerDistance[corners.length - 1] = total;
+    // Any corner that was not blended - too straight, too tight, or squeezed out
+    // by its neighbours - still needs a place on the line for the orientation
+    // schedule. Between the two either side of it is the honest answer.
+    for (let i = 1; i < corners.length - 1; i++) {
+      if (cornerDistance[i] === 0) {
+        cornerDistance[i] = (cornerDistance[i - 1] + cornerDistance[i + 1] || total) / 2;
+      }
+    }
+
+    const attitudes: Array<Rotation3 | undefined> = [
+      heldOrientation ??
+        (resolved.some(w => w.orientation)
+          ? ForwardKinematics.solve(startAngles).endEffectorPose.rotation
+          : undefined),
+      ...resolved.map(w => heldOrientation ?? w.orientation)
+    ];
+
+    /** The attitude wanted at a given distance along the blended path. */
+    const attitudeAt = (d: number): Rotation3 | undefined => {
+      if (!attitudes.some(Boolean)) return undefined;
+      for (let i = 1; i < cornerDistance.length; i++) {
+        if (d > cornerDistance[i] && i < cornerDistance.length - 1) continue;
+        const span = cornerDistance[i] - cornerDistance[i - 1];
+        const t = span > 1e-9 ? (d - cornerDistance[i - 1]) / span : 1;
+        return blendRotation(attitudes[i - 1], attitudes[i], t);
+      }
+      return attitudes[attitudes.length - 1];
+    };
+
+    const segments: TrajectorySegment[] = [];
+    let segStartAngles = [...startAngles];
+    let timeOffset = 0;
+    let travelled = 0;
+    let cornerCursor = 1;
+
+    for (const piece of pieces) {
+      const speed = (resolved[Math.min(cornerCursor - 1, resolved.length - 1)]?.speed ||
+        this.config.defaultSpeed) * this.config.speedScale;
+
+      const segment = this.interpolator.interpolatePiece(
+        segStartAngles,
+        piece,
+        speed,
+        this.config.defaultAcceleration * this.config.speedScale,
+        this.config.pointsPerSecond,
+        attitudeAt(travelled),
+        attitudeAt(travelled + piece.length)
+      );
+
+      if (piece.kind === 'arc') cornerCursor = Math.min(resolved.length, piece.cornerIndex);
+      segment.startWaypoint = Math.max(0, cornerCursor - 1);
+      segment.endWaypoint = Math.min(resolved.length - 1, cornerCursor);
+
+      const offset = timeOffset;
+      segment.points = segment.points.map(p => ({ ...p, time: p.time + offset }));
+
+      segments.push(segment);
+      timeOffset += segment.duration;
+      travelled += piece.length;
+
+      if (segment.points.length > 0) {
+        segStartAngles = [...segment.points[segment.points.length - 1].jointAngles];
+      }
+    }
+
+    return this.summarise(segments, waypoints, []);
+  }
+
+  /** Roll a list of planned segments up into a trajectory. */
+  private summarise(
+    segments: TrajectorySegment[],
+    waypoints: Waypoint[],
+    skippedWaypoints: string[]
+  ): Trajectory {
+    // The first jump anywhere in the path. Segments have carried this since
+    // linear moves learned to detect it, and nothing read it: a path could run
+    // through a 44 degree wrist flip that a single move to the same place
+    // refuses.
+    let discontinuity: Trajectory['discontinuity'] = null;
+    for (let i = 0; i < segments.length && !discontinuity; i++) {
+      const jump = segments[i].discontinuity;
+      if (jump) discontinuity = { ...jump, segment: i };
+    }
 
     return {
       segments,
-      totalDuration,
-      totalDistance,
-      pointCount,
+      totalDuration: segments.reduce((sum, s) => sum + s.duration, 0),
+      totalDistance: segments.reduce((sum, s) => sum + s.distance, 0),
+      pointCount: segments.reduce((sum, s) => sum + s.points.length, 0),
       waypoints,
-      unreachableSamples,
-      skippedWaypoints
+      unreachableSamples: segments.reduce((sum, s) => sum + (s.unreachableSamples ?? 0), 0),
+      skippedWaypoints,
+      discontinuity
     };
   }
 

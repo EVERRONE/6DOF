@@ -8,6 +8,7 @@
 
 import { TrajectoryPoint, TrajectorySegment, Waypoint, WaypointShape } from './types';
 import { pointOnCircle } from './Shapes';
+import { PathPiece, pointOnPiece } from './CornerBlend';
 import { VelocityProfile } from './VelocityProfile';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
@@ -17,6 +18,13 @@ import {
   NUM_JOINTS
 } from '../kinematics/robotModel';
 import { Rotation3, Vector3 } from '../kinematics/types';
+import {
+  angleBetweenQuat,
+  matrixToQuat,
+  quatToMatrix,
+  rpyToMatrix,
+  slerp
+} from '../kinematics/linalg';
 
 /**
  * Longest straight chord allowed between two samples of a Cartesian move, in
@@ -90,7 +98,14 @@ export class PathInterpolator {
     endAngles: number[],
     maxJointSpeed: number,
     maxJointAccel: number,
-    pointsPerSecond: number
+    pointsPerSecond: number,
+    /**
+     * Fraction of each joint's own limit to use. The caller's caps above are an
+     * additional ceiling, not a replacement - pass Infinity for them to let the
+     * per-joint limits govern alone, which is what the planner does now that it
+     * no longer carries a second, staler copy of them.
+     */
+    scale = 1
   ): TrajectorySegment {
     const jointDistances = endAngles.map((end, i) => end - startAngles[i]);
     const largest = Math.max(...jointDistances.map(Math.abs));
@@ -109,8 +124,9 @@ export class PathInterpolator {
       const travel = Math.abs(jointDistances[i]);
       if (travel < 1e-9) continue;
 
-      const speedCap = Math.min(JOINT_MAX_SPEED_DEG_S[i], maxJointSpeed);
-      const accelCap = Math.min(JOINT_MAX_ACCEL_DEG_S2[i], maxJointAccel);
+      const bounded = Math.max(0.01, Math.min(1, scale));
+      const speedCap = Math.min(JOINT_MAX_SPEED_DEG_S[i] * bounded, maxJointSpeed);
+      const accelCap = Math.min(JOINT_MAX_ACCEL_DEG_S2[i] * bounded, maxJointAccel);
 
       sMaxVel = Math.min(sMaxVel, speedCap / travel);
       sMaxAccel = Math.min(sMaxAccel, accelCap / travel);
@@ -175,29 +191,78 @@ export class PathInterpolator {
      * 20 mm move - which is fine for getting somewhere and useless for carrying
      * a pen. Held, the solve is exactly determined and costs reach.
      */
-    orientation?: Rotation3
+    orientation?: Rotation3,
+    /**
+     * Orientation to arrive in, when it differs from the one being left.
+     *
+     * Given, the tool is turned from `orientation` to this one along the segment
+     * by slerp, so the attitude changes at a constant rate over the move.
+     * Omitted, `orientation` is simply held.
+     *
+     * Without this a path could only hold one attitude or none: two waypoints
+     * wanting different ones produced a segment that held the second from its
+     * very first sample, so the whole change happened in one step at the
+     * boundary. Measured on waypoints 46.0 degrees apart, the held orientation
+     * moved 46.1 degrees between two consecutive points.
+     */
+    endOrientation?: Rotation3
   ): TrajectorySegment {
-    const startPos = ForwardKinematics.position(startAngles);
+    const from = ForwardKinematics.position(startAngles);
+    const length = Math.hypot(
+      endPosition.x - from.x,
+      endPosition.y - from.y,
+      endPosition.z - from.z
+    );
 
-    const delta = {
-      x: endPosition.x - startPos.x,
-      y: endPosition.y - startPos.y,
-      z: endPosition.z - startPos.z
-    };
-    const distance = Math.sqrt(delta.x ** 2 + delta.y ** 2 + delta.z ** 2);
-
-    if (distance < 1e-9) {
+    if (length < 1e-9) {
       return emptySegment(startAngles);
     }
+
+    return this.interpolatePiece(
+      startAngles,
+      { kind: 'line', from, to: endPosition, length },
+      speed,
+      acceleration,
+      pointsPerSecond,
+      orientation,
+      endOrientation
+    );
+  }
+
+  /**
+   * Sample one piece of a Cartesian path - a straight leg or a blend arc.
+   *
+   * The one place a Cartesian path is turned into joint poses, so a blend arc
+   * gets exactly the treatment a straight line does: the same chord limit, the
+   * same seeded continuity from sample to sample, the same discontinuity check
+   * afterwards. A rounded corner that was sampled more coarsely than the legs
+   * either side of it would put the deviation precisely where the arm is
+   * changing direction fastest.
+   */
+  interpolatePiece(
+    startAngles: number[],
+    piece: PathPiece,
+    speed: number,
+    acceleration: number,
+    pointsPerSecond: number,
+    orientation?: Rotation3,
+    endOrientation?: Rotation3
+  ): TrajectorySegment {
+    const distance = piece.length;
+    if (distance < 1e-9) return emptySegment(startAngles);
 
     // mm/s and mm/s^2 from the caller, metres internally.
     const profile = new VelocityProfile(distance, speed / 1000, acceleration / 1000);
     const duration = profile.getDuration();
 
+    // The attitude to be in at each point along the way. Held in quaternions
+    // because that is the only form an orientation can be interpolated in.
+    const turn = orientation ? makeTurn(orientation, endOrientation) : null;
+
     // Check the far end before sampling anything. A failing IK solve is the
     // expensive one - it exhausts every seed - so discovering an unreachable
     // target after several hundred of them is the worst possible order.
-    const endCheck = this.solveAt(endPosition, orientation, startAngles);
+    const endCheck = this.solveAtMatrix(piece.to, turn ? turn(1) : null, startAngles);
     if (!endCheck.success) {
       return { ...emptySegment(startAngles), distance, unreachableSamples: 1 };
     }
@@ -218,14 +283,9 @@ export class PathInterpolator {
 
     for (let k = 0; k <= steps; k++) {
       const s = k / steps;
+      const target = pointOnPiece(piece, s);
 
-      const target: Vector3 = {
-        x: startPos.x + delta.x * s,
-        y: startPos.y + delta.y * s,
-        z: startPos.z + delta.z * s
-      };
-
-      const ik = this.solveAt(target, orientation, currentAngles);
+      const ik = this.solveAtMatrix(target, turn ? turn(s) : null, currentAngles);
 
       if (ik.success) {
         currentAngles = ik.jointAngles;
@@ -356,6 +416,43 @@ export class PathInterpolator {
       ? this.ikSolver.solvePose({ position, rotation: orientation }, seed)
       : this.ikSolver.solvePosition(position, seed);
   }
+
+  /** As solveAt, for an orientation already reduced to a rotation matrix. */
+  private solveAtMatrix(position: Vector3, rotation: number[][] | null, seed: number[]) {
+    return rotation
+      ? this.ikSolver.solvePoseMatrix(position, rotation, seed)
+      : this.ikSolver.solvePosition(position, seed);
+  }
+}
+
+/**
+ * The attitude to be in at each fraction of a segment.
+ *
+ * With one orientation this is a constant. With two it is a slerp between them,
+ * so the tool turns at a steady rate over the move instead of the whole change
+ * landing in a single step at the boundary. Built once per segment rather than
+ * per sample: the conversion to quaternions is the only part that is not free,
+ * and a segment can run to a thousand samples.
+ */
+function makeTurn(from: Rotation3, to?: Rotation3): (s: number) => number[][] {
+  const a = matrixToQuat(rpyToMatrix(from));
+
+  if (!to) {
+    const held = quatToMatrix(a);
+    return () => held;
+  }
+
+  const b = matrixToQuat(rpyToMatrix(to));
+
+  // Nothing to turn through. Worth catching, because slerp between two nearly
+  // identical quaternions is the case its own fallback exists for, and skipping
+  // it entirely is both faster and exact.
+  if (angleBetweenQuat(a, b) < 1e-9) {
+    const held = quatToMatrix(a);
+    return () => held;
+  }
+
+  return (s: number) => quatToMatrix(slerp(a, b, Math.max(0, Math.min(1, s))));
 }
 
 // ---------------------------------------------------------------------------

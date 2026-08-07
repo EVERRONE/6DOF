@@ -58,6 +58,33 @@ export interface IKOptions {
   maxSeeds: number;
 }
 
+// !! THE WRIST SINGULARITY IS NOT HANDLED HERE, and three attempts to handle it
+// !! by tuning this solver have failed. See docs/KINEMATICS.md for the numbers.
+// !!
+// !! At the parked pose J5 sits at URDF zero, so J4 and J6 turn the tool about
+// !! the same axis: their columns in the orientation Jacobian are identical and
+// !! the determinant is 2.5e-17. Only J4 + J6 is determined and the split
+// !! between them is free, so a step swapping 44 degrees from one into the other
+// !! costs nothing in tool pose and is accepted for a 0.001 mm improvement.
+// !!
+// !! Harmless in a single solve, which only has to land somewhere. Ruinous along
+// !! a path, where each sample is seeded from the last.
+// !!
+// !! What was tried, all measured on a 100 mm line from the parked pose against
+// !! a 44.1 degree baseline: a shorter trust region (53.0), a single seed with
+// !! no restarts (44.1), and a seed bias mu*||q - anchor||^2 in the normal
+// !! equations - first with the penalty in the step alone (470), then with the
+// !! accept test minimising the same augmented function (45.5 at 1e-4, 459 at
+// !! 1e-3, no convergence above). The bias fails because the weight that
+// !! suppresses a free 22 degree swap is the same order as the weight that stops
+// !! the solver reaching the target at all; there is no window between them.
+// !!
+// !! A weighting cannot fix a rank deficiency that is exact rather than
+// !! approximate. The fix is to remove the redundant freedom instead: when J5 is
+// !! within a threshold of the singular value, lock J4 and solve on five joints,
+// !! which is what industrial controllers do. Until then PathInterpolator
+// !! detects the jump and callers refuse on it.
+
 export const DEFAULT_IK_OPTIONS: IKOptions = {
   maxIterations: 150,
   positionTolerance: 0.0005, // 0.5 mm
@@ -134,6 +161,19 @@ export class InverseKinematics {
       { position: targetPose.position, rotation: rpyToMatrix(targetPose.rotation) },
       initialGuess
     );
+  }
+
+  /**
+   * Solve for a pose whose orientation is already a rotation matrix.
+   *
+   * The path interpolator works in quaternions, because interpolating an
+   * attitude is the one job Euler angles cannot do. Going quaternion -> rpy ->
+   * matrix to reach solvePose throws away precision at exactly the attitudes
+   * where rpy is worst - the wrap at +/-pi and gimbal lock - for no reason,
+   * since the solver holds a matrix internally anyway.
+   */
+  solvePoseMatrix(position: Vector3, rotation: number[][], initialGuess?: number[]): IKResult {
+    return this.run({ position, rotation }, initialGuess);
   }
 
   /** True when a position can be reached within tolerance from some seed. */
