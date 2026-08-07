@@ -19,6 +19,10 @@ export const CartesianControlPanel: React.FC = () => {
     ikStatus,
     toolLocked,
     setToolLocked,
+    cartesianMode,
+    setCartesianMode,
+    cartesianSpeed,
+    setCartesianSpeed,
     firmwareStatus
   } = useRobotStore();
 
@@ -128,6 +132,55 @@ export const CartesianControlPanel: React.FC = () => {
   return (
     <div className="p-4 bg-white border-b">
       <h2 className="text-xl font-bold mb-4">Cartesian Control</h2>
+
+      {/* How the arm gets there, which is a separate question from where it ends
+          up. Solving only the destination leaves the path between unconstrained:
+          measured on a 100 mm move in +Y, the tool bows 7.7 mm off the straight
+          line and tips 11.13 degrees at the midpoint, both back to zero at the
+          far end where the solve was done. */}
+      <div className="mb-4">
+        <h3 className="text-sm font-semibold mb-2 text-gray-700">Path</h3>
+        <div className="flex gap-2">
+          {(['linear', 'joint'] as const).map(mode => (
+            <button
+              key={mode}
+              onClick={() => setCartesianMode(mode)}
+              disabled={!isConnected}
+              className={`flex-1 px-3 py-2 text-xs rounded border text-left disabled:opacity-50 ${
+                cartesianMode === mode
+                  ? 'bg-blue-50 border-blue-400 text-blue-900'
+                  : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <span className="block font-semibold">
+                {mode === 'linear' ? 'Straight line' : 'Fastest'}
+              </span>
+              <span className="block mt-0.5 text-gray-500">
+                {mode === 'linear'
+                  ? 'IK every 2 mm — the tool travels the line and keeps its angle'
+                  : 'One solve, joints run proportionally — curved, and the tool tips'}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        {cartesianMode === 'linear' && (
+          <label className="flex items-center gap-2 mt-2 text-xs">
+            <span className="text-gray-500 w-10">speed</span>
+            <input
+              type="range"
+              min={5}
+              max={300}
+              step={5}
+              value={cartesianSpeed}
+              disabled={!isConnected}
+              onChange={e => setCartesianSpeed(Number(e.target.value))}
+              className="flex-1"
+            />
+            <span className="w-16 font-mono text-right">{cartesianSpeed} mm/s</span>
+          </label>
+        )}
+      </div>
 
       {/* Orientation lock. Without it a Cartesian move solves position only -
           three equations against six joints - so the tool tips as the arm

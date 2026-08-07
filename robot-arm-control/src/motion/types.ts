@@ -84,6 +84,27 @@ export interface TrajectorySegment {
    * out of reach and the arm will cut the corner there.
    */
   unreachableSamples?: number;
+  /**
+   * Where consecutive samples jump in joint space, or null when the path is
+   * continuous.
+   *
+   * Two samples 2 mm apart normally differ by a degree or so. Near a singularity
+   * they can differ by tens of degrees while the tool barely moves, because the
+   * arm is free to reconfigure in a direction the tool cannot see. The tool pose
+   * is correct at both samples and wrong everywhere between them, and no amount
+   * of finer Cartesian sampling fixes it - the discontinuity is in joint space,
+   * not in the line.
+   */
+  discontinuity?: {
+    /** Sample index the jump lands on. */
+    index: number;
+    /** How far along the segment, as a percentage. */
+    atPercent: number;
+    /** Zero-based joint that moved furthest. */
+    axis: number;
+    /** How far it moved, in degrees. */
+    degrees: number;
+  } | null;
 }
 
 /**

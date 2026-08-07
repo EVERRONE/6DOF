@@ -310,8 +310,9 @@ limits**, whether or not the solve converged.
 pick-and-place, drawing, general positioning.
 
 **`solvePose`** — constrains all six degrees of freedom. Use for tool
-alignment. Harder to satisfy on this arm: with J2 limited to 0–60° and J3 to
-0–70°, not every orientation is attainable at every point.
+alignment. Harder to satisfy on this arm: J2 travels 2–86° and J3 2–104°, so not
+every orientation is attainable at every point, and holding the tool costs reach
+— from the parked pose, roughly 40 mm in +X against 85 mm free.
 
 ### Measured behaviour
 
@@ -337,13 +338,18 @@ limits:
 
 | Axis | Min | Max |
 |------|-----|-----|
-| X | −203 mm | +70 mm |
-| Y | −115 mm | +138 mm |
-| Z | +146 mm | +384 mm |
+| X | −340 mm | +8 mm |
+| Y | −340 mm | +340 mm |
+| Z | +23 mm | +435 mm |
 
-The workspace is small and strongly off-centre because J1 only travels −40…30°
-and J2 only 0…60°. `CartesianControlPanel` derives its input ranges from this
-function rather than hardcoding them.
+Strongly off-centre in X because the arm reaches out along −X from the parked
+pose and J1's ±90° cannot bring it round. `CartesianControlPanel` derives its
+input ranges from this function rather than hardcoding them.
+
+> These replace an earlier table quoting −203…+70 in X and −115…+138 in Y, which
+> was measured when J1 travelled −40…30° and J2 travelled 0…60°. Those limits
+> came from a guess; the design values in `config.h` are much wider, and the
+> reachable set roughly trebled with them.
 
 **The bounding box is an outer bound, not the reachable set.** A point inside
 the box can still be unreachable. The IK result is the authority.
@@ -354,12 +360,63 @@ Configurations where the Jacobian loses rank:
 
 1. **Shoulder** — J2 and J3 aligned (fully extended or fully retracted)
 2. **Elbow** — arm straight
-3. **Wrist** — J4 and J6 axes aligned (J5 at either end of its travel)
+3. **Wrist** — J4 and J6 axes aligned
 
-The adaptive damping handles these: near a singularity the cost stops improving,
-the damping rises, and the step shortens instead of exploding. The solver will
-not produce a wild joint jump at a singularity, though it may not reach a target
-that requires passing exactly through one.
+The adaptive damping keeps a *single* solve well behaved: near a singularity the
+cost stops improving, the damping rises, and the step shortens instead of
+exploding. A solve lands somewhere sensible, or reports that it could not.
+
+**Along a path, that is not enough, and the wrist case is not hypothetical on
+this arm.**
+
+> **The arm parks in its wrist singularity.** `POST_HOME_ANGLES` puts J5 at 131°,
+> which is URDF zero for that joint — exactly where a spherical wrist degenerates.
+> Measured at the parked pose, the orientation Jacobian's J4 and J6 columns are
+> identical, both `[1, 0, 0]`, and its determinant is 2.5 × 10⁻¹⁷. The wrist
+> cannot turn the tool about `wz` at all, and only **J4 + J6** is determined —
+> the split between them is free.
+
+Free is the problem. A single solve only has to land somewhere, so an arbitrary
+split is harmless. Along a sampled path, where each sample is seeded from the
+last, the solver will happily move 44° from J4 into J6 between two samples 2 mm
+apart, because that costs nothing in tool pose and buys a 0.001 mm improvement.
+The tool pose is correct at both samples and wrong everywhere between them, and
+sampling the line more finely does not help — the discontinuity is in joint
+space, not in the line.
+
+How fast it decays with distance from the singularity, on a 100 mm linear move
+with the tool held:
+
+| J5, URDF | 0° | ±2° | ±5° | ±10° | ±20° | ±30° | ±40° |
+|---|---|---|---|---|---|---|---|
+| worst step per 2 mm | 44.1° | 20.8° | 8.3° | 4.4° | 1.9° | 1.3° | 1.0° |
+
+**What the code does about it.** `PathInterpolator.findDiscontinuity` flags a step
+that is both more than 10× the path's median step and more than 5° in absolute
+terms — relative rather than absolute, the same way MoveIt's Cartesian
+interpolator treats it, because a path where *every* step is large is merely a
+fast path. `moveAlongLine` refuses on it and says where. A joint-space move to
+the same destination is unaffected and still works: the destination is reachable
+with the orientation held, it is getting there in a straight line that is not.
+
+**What it does not do.** Nothing resolves the singularity. Three things were
+tried and measured on the 100 mm move above, and none worked:
+
+| Attempt | Result |
+|---------|--------|
+| Shorter trust region (`maxStepRad` 0.35 → 0.02) | 53.0° — worse |
+| Single seed, no restarts | 44.1° — unchanged |
+| Seed bias `μ‖q − q_seed‖²` in the normal equations | 470° at μ=1e-4, no convergence at μ=1e-3 |
+
+The seed bias failed because the LM acceptance test compares the *task* cost
+while the step minimises the *augmented* cost, so the two disagree about which
+steps are progress. Making that work means the accept test has to minimise the
+same objective the step does — a solver change, not a parameter.
+
+The practical answer for now is to move J5 5–20° off 131° before asking for
+orientation-held linear motion. A proper fix is singularity-robust IK: lock the
+redundant joint when the wrist degenerates, or carry an explicit null-space
+objective through both the step and the accept test.
 
 ---
 

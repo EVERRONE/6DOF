@@ -256,7 +256,8 @@ export class PathInterpolator {
       points,
       duration,
       distance,
-      unreachableSamples: failures
+      unreachableSamples: failures,
+      discontinuity: findDiscontinuity(points)
     };
   }
 
@@ -328,7 +329,8 @@ export class PathInterpolator {
       points,
       duration,
       distance: length,
-      unreachableSamples: failures
+      unreachableSamples: failures,
+      discontinuity: findDiscontinuity(points)
     };
   }
 
@@ -393,6 +395,73 @@ function appendExactEnd(
 
   last.jointAngles = [...endAngles];
   last.velocity = Array(NUM_JOINTS).fill(0);
+}
+
+/**
+ * How far a single step must stand out from the rest of the path before it
+ * counts as a discontinuity rather than a fast bit.
+ *
+ * Relative rather than absolute, which is how MoveIt's Cartesian interpolator
+ * treats the same problem. A path where every step is large is simply a fast
+ * path, and the firmware clamps it to the joint limits; a path where one step is
+ * forty times its neighbours is the arm reconfiguring through a singularity.
+ */
+const JUMP_FACTOR = 10;
+
+/**
+ * Absolute floor, so a path made of very small steps cannot trip the relative
+ * test on rounding noise. Below this the firmware's own interpolation across the
+ * step cannot take the tool far from where it should be anyway.
+ */
+const JUMP_FLOOR_DEG = 5;
+
+/**
+ * Find where the joint path jumps, if it does.
+ *
+ * The tool pose is right at every sample by construction - IK put it there. What
+ * this catches is a pair of samples the tool can barely tell apart while the arm
+ * between them is somewhere else entirely. Sampling the line more finely does
+ * not help: the jump is in joint space, and halving the Cartesian step just puts
+ * the same reconfiguration into a smaller gap.
+ */
+function findDiscontinuity(points: TrajectoryPoint[]): TrajectorySegment['discontinuity'] {
+  if (points.length < 3) return null;
+
+  const steps: number[] = [];
+  const worstAxis: number[] = [];
+
+  for (let i = 1; i < points.length; i++) {
+    let step = 0;
+    let axis = 0;
+    for (let j = 0; j < NUM_JOINTS; j++) {
+      const d = Math.abs(points[i].jointAngles[j] - points[i - 1].jointAngles[j]);
+      if (d > step) {
+        step = d;
+        axis = j;
+      }
+    }
+    steps.push(step);
+    worstAxis.push(axis);
+  }
+
+  const sorted = [...steps].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+
+  let worst = -1;
+  for (let i = 0; i < steps.length; i++) {
+    if (steps[i] < JUMP_FLOOR_DEG) continue;
+    if (steps[i] < JUMP_FACTOR * median) continue;
+    if (worst < 0 || steps[i] > steps[worst]) worst = i;
+  }
+
+  if (worst < 0) return null;
+
+  return {
+    index: worst + 1,
+    atPercent: Math.round(((worst + 1) / (points.length - 1)) * 100),
+    axis: worstAxis[worst],
+    degrees: steps[worst]
+  };
 }
 
 /** Straight-line TCP distance between two joint poses, in metres. */

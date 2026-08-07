@@ -15,6 +15,7 @@ import {
   SavedPath
 } from '../motion/types';
 import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG } from '../motion/TrajectoryPlanner';
+import { PathInterpolator } from '../motion/PathInterpolator';
 import { makeCircleWaypoint, validateCircle } from '../motion/Shapes';
 import { ShapePlane, WaypointShape } from '../motion/types';
 import {
@@ -84,6 +85,26 @@ interface RobotStore {
   targetPosition: Vector3 | null;
   ikStatus: IKResult | null;
 
+  /**
+   * How a Cartesian move gets from here to there.
+   *
+   * `linear` solves IK along the straight line and streams the samples, so the
+   * tool travels the line it was shown and holds its orientation the whole way.
+   * `joint` solves the destination once and lets every joint run proportionally
+   * to it - faster, always reachable if the destination is, and curved in
+   * Cartesian space with the tool tipping several degrees on the way.
+   *
+   * Linear by default: a target typed into a Cartesian panel is a statement
+   * about where the tool should be, and a path that bows 7.7 mm off it is a
+   * surprise. Joint is there for repositioning in free space, and as the escape
+   * when the line itself is unreachable.
+   */
+  cartesianMode: 'linear' | 'joint';
+  /** Tool speed along a linear move, mm/s. */
+  cartesianSpeed: number;
+  /** Tool acceleration along a linear move, mm/s^2. */
+  cartesianAccel: number;
+
   // UI state
   manualSpeed: number;
 
@@ -138,6 +159,14 @@ interface RobotStore {
   // Cartesian space actions
   setTargetPosition: (position: Vector3) => void;
   moveToPosition: (position: Vector3) => Promise<void>;
+  /**
+   * Stream the straight line to `position`, holding `orientation` at every
+   * sample. Called by moveToPosition in linear mode; separate so the geometry
+   * can be tested without the guards and the IK in front of it.
+   */
+  moveAlongLine: (position: Vector3, orientation?: Rotation3) => Promise<void>;
+  setCartesianMode: (mode: 'linear' | 'joint') => void;
+  setCartesianSpeed: (mmPerSecond: number) => void;
   updateCurrentPosition: () => void;
   setToolLocked: (locked: boolean) => void;
 
@@ -189,6 +218,10 @@ const ikSolver = new InverseKinematics();
 // Trajectory planner instance
 let trajectoryPlanner = new TrajectoryPlanner();
 
+// Used for single Cartesian moves, which need the same straight-line sampling a
+// planned path gets but none of the waypoint machinery around it.
+const pathInterpolator = new PathInterpolator();
+
 // Execution control
 let executionAbortController: AbortController | null = null;
 let executionPaused = false;
@@ -204,6 +237,45 @@ const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 
 /** Result of offering one trajectory point to the firmware. */
 type SendOutcome = 'sent' | 'aborted' | 'paused';
+
+/**
+ * Offer one point to the firmware, waiting for queue space if it is full.
+ *
+ * `BUSY` is normal back-pressure while streaming, not a fault: the firmware
+ * holds a bounded queue and answers `BUSY` rather than dropping the move, so the
+ * caller resends. Keeping that queue full is the whole mechanism by which a
+ * streamed path comes out smooth - the planner needs look-ahead to carry speed
+ * from one point into the next instead of stopping at each one.
+ *
+ * Shared by both streamers because this retry is the part that is easy to get
+ * subtly wrong. The loops around it are not shared: running a taught path has
+ * pause and per-segment progress semantics that a single Cartesian move does not.
+ *
+ * @param guard checked before every attempt, so a cancel lands within one retry
+ *        interval rather than after the queue drains - which can be seconds.
+ */
+async function offerPoint(
+  serialManager: SerialManager,
+  angles: JointAngles,
+  speed: number,
+  guard: () => SendOutcome | null
+): Promise<SendOutcome> {
+  for (let attempt = 0; attempt < 2000; attempt++) {
+    const interrupted = guard();
+    if (interrupted) return interrupted;
+
+    const ack = await serialManager.moveToAngles(angles, speed);
+    if (ack.accepted) return 'sent';
+
+    await sleep(20);
+  }
+  throw new Error('Firmware motion queue never drained');
+}
+
+/** Joint angles array to the record the serial layer wants. */
+function toJointAngles(q: number[]): JointAngles {
+  return { J1: q[0], J2: q[1], J3: q[2], J4: q[3], J5: q[4], J6: q[5] };
+}
 
 /** Map the firmware's reported state onto the UI's state enum. */
 function toRobotState(state: FirmwareState): RobotState {
@@ -268,6 +340,13 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   lockedRotation: null,
   targetPosition: null,
   ikStatus: null,
+  cartesianMode: 'linear',
+  // Slow enough to watch and to stop, and well inside what the joints can do:
+  // J1 at its 120 deg/s limit sweeps about 420 mm/s at a 200 mm radius. The
+  // firmware clamps per joint anyway, so asking for too much costs accuracy in
+  // the duration estimate rather than control of the arm.
+  cartesianSpeed: 50,
+  cartesianAccel: 200,
   manualSpeed: 30,
 
   // Trajectory initial state
@@ -591,6 +670,17 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     await get().refreshAxisLimits();
   },
 
+  setCartesianMode: (mode) => set({ cartesianMode: mode }),
+
+  setCartesianSpeed: (mmPerSecond) => {
+    const speed = Math.max(1, Math.min(500, mmPerSecond));
+    // Acceleration tracks speed rather than being set separately. Reaching the
+    // requested speed inside a quarter of a second is what keeps the ramp short
+    // relative to the move; a fixed acceleration would turn a slow move into a
+    // long ramp with no cruise, which is where the tool tips.
+    set({ cartesianSpeed: speed, cartesianAccel: speed * 4 });
+  },
+
   setToolLocked: (locked) => {
     if (!locked) {
       set({ toolLocked: false, lockedRotation: null });
@@ -655,10 +745,15 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     // constraints against six joints, which is exactly determined and costs
     // reach - from the parked pose, roughly 40 mm in +X against 85 mm free.
     // Unlocked, orientation is left to fall where it may.
-    const ikResult =
-      toolLocked && lockedRotation
-        ? ikSolver.solvePose({ position, rotation: lockedRotation }, initialGuess)
-        : ikSolver.solvePosition(position, initialGuess);
+    const orientation = toolLocked && lockedRotation ? lockedRotation : undefined;
+
+    // Solved here as well as inside the line interpolator, to answer two
+    // questions the interpolator does not: whether the destination is reachable
+    // at all, which is the cheap check to fail on first, and what residual to
+    // show in the panel.
+    const ikResult = orientation
+      ? ikSolver.solvePose({ position, rotation: orientation }, initialGuess)
+      : ikSolver.solvePosition(position, initialGuess);
 
     // Store IK status for UI feedback
     set({ ikStatus: ikResult });
@@ -683,25 +778,154 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       return;
     }
 
-    const targetAngles: JointAngles = {
-      J1: ikResult.jointAngles[0],
-      J2: ikResult.jointAngles[1],
-      J3: ikResult.jointAngles[2],
-      J4: ikResult.jointAngles[3],
-      J5: ikResult.jointAngles[4],
-      J6: ikResult.jointAngles[5]
-    };
-
+    const targetAngles = toJointAngles(ikResult.jointAngles);
     set({ targetAngles });
 
-    get().logEvent('sent', 'move to XYZ target');
-    const ack = await serialManager.moveToAngles(targetAngles, manualSpeed);
-    if (!ack.accepted) {
-      get().logEvent('error', 'Move refused: firmware queue full');
+    if (get().cartesianMode === 'joint') {
+      get().logEvent('sent', 'move to XYZ target, joint path');
+      const ack = await serialManager.moveToAngles(targetAngles, manualSpeed);
+      if (!ack.accepted) {
+        get().logEvent('error', 'Move refused: firmware queue full');
+        return;
+      }
+      set({ robotState: RobotState.MOVING });
       return;
     }
 
+    await get().moveAlongLine(position, orientation);
+  },
+
+  /**
+   * Drive the tool along the straight line to `position`, solving IK at every
+   * sample rather than only at the two ends.
+   *
+   * Solving only the ends and sending one joint move constrains nothing in
+   * between. The firmware, given a start pose and an end pose, moves every joint
+   * proportionally so they arrive together - a perfectly valid path between the
+   * two, and an arbitrary one. Measured on a 100 mm move in +Y from the parked
+   * pose, that path bows 7.7 mm off the straight line and tips the tool 11.13
+   * degrees at the midpoint, with both errors falling back to zero at the far
+   * end where the solve was done.
+   *
+   * The give-away is J4, the wrist joint that holds the tool level. Holding the
+   * tool still needs almost its whole 88 degree move inside the first few
+   * millimetres and then nothing - 165 -> 84 -> 77 -> 75 -> 75. Spread evenly
+   * across the move instead - 165, 154, 143, 132, 121 - the tool tips with it.
+   *
+   * Sampling every 2 mm with the orientation constraint applied at each one
+   * leaves the firmware only a 2 mm gap to fill, where the same proportional
+   * interpolation cannot go far wrong. The same move then holds 0.29 degrees.
+   */
+  moveAlongLine: async (position, orientation) => {
+    const { serialManager, currentAngles, cartesianSpeed, cartesianAccel } = get();
+    if (!serialManager) return;
+
+    const startAngles = [
+      currentAngles.J1, currentAngles.J2, currentAngles.J3,
+      currentAngles.J4, currentAngles.J5, currentAngles.J6
+    ];
+
+    const segment = pathInterpolator.interpolateCartesianSpace(
+      startAngles,
+      position,
+      cartesianSpeed,
+      cartesianAccel,
+      20,
+      orientation
+    );
+
+    // The endpoint is reachable - it was solved above - but the straight line to
+    // it need not be. Refuse rather than run the part that works: a move that
+    // stops partway leaves the tool somewhere nobody asked for, and the arm is
+    // then not where the panel says it is going.
+    if ((segment.unreachableSamples ?? 0) > 0 || segment.points.length < 2) {
+      get().logEvent(
+        'error',
+        'The target is reachable but the straight line to it is not — ' +
+          `${segment.unreachableSamples ?? 0} of ${segment.points.length} points ` +
+          'have no solution. Move somewhere in between first, or switch to a joint path.'
+      );
+      return;
+    }
+
+    // A jump between two samples that are 2 mm apart in tool space. The tool pose
+    // is right at both of them and unconstrained between, and the firmware fills
+    // that gap by moving every joint proportionally - which is precisely the
+    // problem this whole path was built to avoid, reappearing inside one step.
+    //
+    // Refused rather than run. At the parked pose this is a 44 degree wrist
+    // counter-rotation demanding 753 deg/s of joints limited to 180 and 360: the
+    // firmware clamps it, so nothing breaks, but the arm spends the move
+    // thrashing and the tool does not hold its angle while it does.
+    const jump = segment.discontinuity;
+    if (jump) {
+      get().logEvent(
+        'error',
+        `Refusing the move: J${jump.axis + 1} jumps ${jump.degrees.toFixed(0)}° ` +
+          `between two samples 2 mm apart, ${jump.atPercent}% along. The arm is ` +
+          'reconfiguring through a singularity — the tool is only held either side ' +
+          'of that jump, not through it. Move J5 away from 131° first, or use a joint path.'
+      );
+      return;
+    }
+
+    // Every sample, not just the destination. A line can pass through a pose that
+    // folds the arm into itself while both of its ends are clear.
+    const collision = firstCollidingPoint(segment.points.map(p => p.jointAngles));
+    if (collision) {
+      const atPercent = Math.round((collision.index / (segment.points.length - 1)) * 100);
+      get().logEvent(
+        'error',
+        `Refusing the move: the straight line folds the arm into itself ` +
+          `${atPercent}% of the way along (${collision.result.message}).`
+      );
+      return;
+    }
+
+    executionAbortController = new AbortController();
+    const aborted = () => executionAbortController?.signal.aborted ?? true;
+
+    get().logEvent(
+      'sent',
+      `move to XYZ target, straight line in ${segment.points.length} points ` +
+        `(${(segment.distance * 1000).toFixed(0)} mm)`
+    );
     set({ robotState: RobotState.MOVING });
+
+    try {
+      for (let i = 1; i < segment.points.length; i++) {
+        // Per-point speed, so the tool actually travels at the requested mm/s.
+        // A single figure for the whole move cannot do that: each 2 mm step
+        // needs a different joint speed depending on how the arm is folded, and
+        // near a singularity the same 2 mm costs far more joint travel than it
+        // does in the middle of the workspace.
+        const dt = segment.points[i].time - segment.points[i - 1].time;
+        const travel = Math.max(
+          ...segment.points[i].jointAngles.map((v, j) =>
+            Math.abs(v - segment.points[i - 1].jointAngles[j])
+          )
+        );
+        const speed = dt > 1e-6 ? travel / dt : cartesianSpeed;
+
+        const outcome = await offerPoint(
+          serialManager,
+          toJointAngles(segment.points[i].jointAngles),
+          speed,
+          () => (aborted() ? 'aborted' : null)
+        );
+
+        if (outcome !== 'sent') {
+          get().logEvent('info', 'Cartesian move cancelled');
+          return;
+        }
+      }
+    } catch (error) {
+      if (!aborted()) {
+        get().logEvent('error', `Cartesian move failed: ${(error as Error).message}`);
+      }
+    } finally {
+      executionAbortController = null;
+    }
   },
 
   // ===== WAYPOINT ACTIONS =====
@@ -1000,23 +1224,14 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
      * trajectory and kept the queue shallow, so the arm restarted from a standstill
      * at every point.
      */
-    const sendPoint = async (angles: JointAngles): Promise<SendOutcome> => {
-      for (let attempt = 0; attempt < 2000; attempt++) {
-        if (aborted()) return 'aborted';
-
-        // A full queue can hold the sender here for seconds, so the pause has to
-        // be observed inside the retry loop too. Checking only at the top of the
-        // outer loop left the pause button doing nothing until the queue drained.
-        if (executionPaused) return 'paused';
-
-        const ack = await serialManager.moveToAngles(angles, speed);
-        if (ack.accepted) return 'sent';
-
-        // Queue full: normal back-pressure. Wait for the arm to consume a move.
-        await sleep(20);
-      }
-      throw new Error('Firmware motion queue never drained');
-    };
+    const sendPoint = (angles: JointAngles): Promise<SendOutcome> =>
+      // A full queue can hold the sender for seconds, so both the abort and the
+      // pause have to be observed inside the retry loop. Checking only at the top
+      // of the outer loop left the pause button doing nothing until the queue
+      // drained.
+      offerPoint(serialManager, angles, speed, () =>
+        aborted() ? 'aborted' : executionPaused ? 'paused' : null
+      );
 
     /** Wait for a status report, issued after `since`, that says the arm is idle. */
     const waitUntilIdle = async (since: number): Promise<void> => {

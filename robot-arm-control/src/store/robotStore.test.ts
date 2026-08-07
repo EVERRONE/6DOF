@@ -16,7 +16,7 @@ import { ExecutionState, Waypoint } from '../motion/types';
 import { TrajectoryPlanner } from '../motion/TrajectoryPlanner';
 import { rotationLog, multiply3, transpose3 } from '../kinematics/linalg';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
-import { JOINT_LIMITS_DEG, HOME_POSE_DEG } from '../kinematics/robotModel';
+import { JOINT_LIMITS_DEG, HOME_POSE_DEG, degToRad } from '../kinematics/robotModel';
 import { FakePort, FakeSerial, commandsOfType } from '../testUtils/fakeSerial';
 
 const flush = () => new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -119,6 +119,9 @@ beforeEach(() => {
     targetPosition: null,
     toolLocked: false,
     lockedRotation: null,
+    cartesianMode: 'linear',
+    cartesianSpeed: 50,
+    cartesianAccel: 200,
     currentAngles: {
       J1: HOME_POSE_DEG[0], J2: HOME_POSE_DEG[1], J3: HOME_POSE_DEG[2],
       J4: HOME_POSE_DEG[3], J5: HOME_POSE_DEG[4], J6: HOME_POSE_DEG[5]
@@ -511,18 +514,141 @@ describe('store: bench controls', () => {
   });
 });
 
+/**
+ * Park the arm clear of its wrist singularity, and report the pose.
+ *
+ * At the parked pose J5 sits at 131 degrees, which is URDF zero for that joint -
+ * exactly where a spherical wrist loses a degree of freedom. There J4 and J6
+ * turn the tool about the same axis, so only their sum matters and the split
+ * between them is free. A linear move from there is refused, deliberately, which
+ * makes it the wrong pose to test ordinary linear motion from.
+ *
+ * 20 degrees away is well clear: the worst per-sample joint step falls from 44
+ * degrees to 1.9.
+ */
+function offSingularity(): number[] {
+  const angles = [...HOME_POSE_DEG];
+  angles[4] = 151;
+  useRobotStore.setState({
+    currentAngles: {
+      J1: angles[0], J2: angles[1], J3: angles[2],
+      J4: angles[3], J5: angles[4], J6: angles[5]
+    }
+  });
+  return angles;
+}
+
 describe('store: Cartesian moves', () => {
-  it('sends the IK solution when the target is reachable', async () => {
+  it('sends one move in joint mode', async () => {
     const { port } = await connectStore();
+    useRobotStore.getState().setCartesianMode('joint');
 
     const target = ForwardKinematics.position([0, 10, 55, 129, 131, 0]);
     await useRobotStore.getState().moveToPosition(target);
-    await flush();
+    await settle();
 
     expect(commandsOfType(port, 'J ')).toHaveLength(1);
     expect(useRobotStore.getState().ikStatus?.success).toBe(true);
     // The marker in the 3D view is driven by this.
     expect(useRobotStore.getState().targetPosition).toBeNull();
+  });
+
+  it('streams the straight line in linear mode, and holds it', async () => {
+    const { port } = await connectStore();
+
+    const start = offSingularity();
+    const from = ForwardKinematics.position(start);
+    const to = { x: from.x, y: from.y + 0.1, z: from.z };
+
+    await useRobotStore.getState().moveToPosition(to);
+    await settle(400);
+
+    const moves = commandsOfType(port, 'J ');
+    // 100 mm at the 2 mm chord limit. One solve and one move is the behaviour
+    // this replaced.
+    expect(moves.length).toBeGreaterThan(20);
+
+    // Every point sent has to lie on the line, not merely the last one. A pure
+    // move in Y must leave X and Z alone the whole way; the single-move version
+    // wandered 7 mm in X and 4 mm in Z at the midpoint.
+    for (const move of moves) {
+      const angles = move.split(/\s+/).slice(1, 7).map(Number);
+      const p = ForwardKinematics.position(angles);
+      expect(Math.abs(p.x - from.x) * 1000).toBeLessThan(1);
+      expect(Math.abs(p.z - from.z) * 1000).toBeLessThan(1);
+    }
+  });
+
+  it('holds the tool orientation at every point, not only at the ends', async () => {
+    const { port } = await connectStore();
+
+    // This is the whole reason the linear path exists. Solving only the two ends
+    // and letting the joints run proportionally satisfies the orientation at
+    // both of them and tips the tool 11.13 degrees in between, because nothing
+    // constrains the middle.
+    const start = offSingularity();
+    const from = ForwardKinematics.position(start);
+    const R0 = ForwardKinematics.solveRad(degToRad(start)).rotation;
+
+    // The lock captures the orientation from the reported angles itself.
+    useRobotStore.getState().setToolLocked(true);
+    expect(useRobotStore.getState().toolLocked).toBe(true);
+
+    await useRobotStore.getState().moveToPosition({ x: from.x, y: from.y + 0.1, z: from.z });
+    await settle(400);
+
+    const moves = commandsOfType(port, 'J ');
+    expect(moves.length).toBeGreaterThan(20);
+
+    let worst = 0;
+    for (const move of moves) {
+      const angles = move.split(/\s+/).slice(1, 7).map(Number);
+      const R = ForwardKinematics.solveRad(degToRad(angles)).rotation;
+      const w = rotationLog(multiply3(R0, transpose3(R)));
+      worst = Math.max(worst, (Math.hypot(w.x, w.y, w.z) * 180) / Math.PI);
+    }
+
+    // Well inside the solver's own 0.5 degree acceptance, and two orders of
+    // magnitude better than the 11.13 it replaced.
+    expect(worst).toBeLessThan(0.5);
+  });
+
+  it('refuses a linear move that reconfigures through the wrist singularity', async () => {
+    const { port } = await connectStore();
+
+    // From the parked pose, where J5 is at URDF zero and the wrist has lost a
+    // degree of freedom: J4 and J6 turn the tool about the same axis, their
+    // columns in the orientation Jacobian are identical, and the determinant is
+    // 2.5e-17. Only J4 + J6 matters, so the solver is free to move 44 degrees
+    // from one into the other between two samples 2 mm apart. The tool pose is
+    // right at both samples and wrong all the way between them, and sampling the
+    // line more finely cannot help - the jump is in joint space.
+    const from = ForwardKinematics.position([...HOME_POSE_DEG]);
+    useRobotStore.getState().setToolLocked(true);
+
+    await useRobotStore.getState().moveToPosition({ x: from.x, y: from.y + 0.1, z: from.z });
+    await settle(400);
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(0);
+    expect(
+      useRobotStore.getState().events.some(e => e.kind === 'error' && /singularity/i.test(e.text))
+    ).toBe(true);
+  });
+
+  it('takes the same move in joint mode, since only the path is the problem', async () => {
+    const { port } = await connectStore();
+
+    const from = ForwardKinematics.position([...HOME_POSE_DEG]);
+    useRobotStore.getState().setToolLocked(true);
+    useRobotStore.getState().setCartesianMode('joint');
+
+    await useRobotStore.getState().moveToPosition({ x: from.x, y: from.y + 0.1, z: from.z });
+    await settle();
+
+    // The destination is perfectly reachable with the orientation held - it is
+    // getting there in a straight line that is not.
+    expect(commandsOfType(port, 'J ')).toHaveLength(1);
+    expect(useRobotStore.getState().ikStatus?.success).toBe(true);
   });
 
   it('sends nothing for an unreachable target, and reports why', async () => {
