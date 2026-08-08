@@ -146,6 +146,8 @@ beforeEach(() => {
     jogFrame: 'base',
     jogStepMm: 5,
     jogStepDeg: 5,
+    teachingWorkObject: null,
+    touchedPoints: [],
     currentAngles: {
       J1: HOME_POSE_DEG[0], J2: HOME_POSE_DEG[1], J3: HOME_POSE_DEG[2],
       J4: HOME_POSE_DEG[3], J5: HOME_POSE_DEG[4], J6: HOME_POSE_DEG[5]
@@ -1363,5 +1365,83 @@ describe('store: jogging the tool', () => {
     await settle(50);
 
     expect(commandsOfType(port, 'J ')).toHaveLength(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('store: teaching a work object across tab changes', () => {
+  it('keeps the touched points when the panel goes away', async () => {
+    await connectStore();
+    const id = useRobotStore.getState().addWorkObject('Jig');
+
+    useRobotStore.getState().beginTeaching(id);
+    useRobotStore.getState().updateCurrentPosition();
+    useRobotStore.getState().touchPoint();
+    expect(useRobotStore.getState().touchedPoints).toHaveLength(1);
+
+    // What switching tabs does: the panel unmounts. The teach must survive it,
+    // because moving the arm between touches is the whole workflow and it used
+    // to live on another tab.
+    const kept = useRobotStore.getState();
+    expect(kept.teachingWorkObject).toBe(id);
+    expect(kept.touchedPoints).toHaveLength(1);
+
+    // Move the arm and touch again, as the operator would.
+    useRobotStore.setState({
+      currentAngles: { ...kept.currentAngles, J2: kept.currentAngles.J2 + 5 }
+    });
+    useRobotStore.getState().updateCurrentPosition();
+    useRobotStore.getState().touchPoint();
+    expect(useRobotStore.getState().touchedPoints).toHaveLength(2);
+  });
+
+  it('builds the frame from the three it kept, and then forgets them', async () => {
+    await connectStore();
+    const id = useRobotStore.getState().addWorkObject('Jig');
+    useRobotStore.getState().beginTeaching(id);
+
+    const base = { ...useRobotStore.getState().currentAngles };
+    for (const change of [{}, { J2: base.J2 + 5 }, { J1: base.J1 + 5 }]) {
+      useRobotStore.setState({ currentAngles: { ...base, ...change } });
+      useRobotStore.getState().updateCurrentPosition();
+      useRobotStore.getState().touchPoint();
+    }
+
+    expect(useRobotStore.getState().finishTeaching()).toBe(true);
+    expect(useRobotStore.getState().teachingWorkObject).toBeNull();
+    expect(useRobotStore.getState().touchedPoints).toHaveLength(0);
+
+    const taught = useRobotStore.getState().workObjects.find(o => o.id === id)!;
+    expect(Math.hypot(taught.origin.x, taught.origin.y, taught.origin.z)).toBeGreaterThan(0);
+  });
+
+  it('keeps the points when the three do not make a frame', async () => {
+    await connectStore();
+    const id = useRobotStore.getState().addWorkObject('Jig');
+    useRobotStore.getState().beginTeaching(id);
+
+    // Three touches without moving: the same point three times, which is not a
+    // frame. Re-touching the third must not mean starting the first two again.
+    useRobotStore.getState().updateCurrentPosition();
+    for (let k = 0; k < 3; k++) useRobotStore.getState().touchPoint();
+
+    expect(useRobotStore.getState().finishTeaching()).toBe(false);
+    expect(useRobotStore.getState().teachingWorkObject).toBe(id);
+    expect(useRobotStore.getState().touchedPoints).toHaveLength(3);
+    useRobotStore.getState().undoTouch();
+    expect(useRobotStore.getState().touchedPoints).toHaveLength(2);
+  });
+
+  it('will not record a point from an untrusted position', async () => {
+    const { port } = await connectStore();
+    const id = useRobotStore.getState().addWorkObject('Jig');
+    useRobotStore.getState().beginTeaching(id);
+
+    port.push('STATUS IDLE 23 0 0 30 1\n');
+    await flush();
+
+    useRobotStore.getState().touchPoint();
+    expect(useRobotStore.getState().touchedPoints).toHaveLength(0);
   });
 });

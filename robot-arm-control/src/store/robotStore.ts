@@ -310,6 +310,26 @@ interface RobotStore {
    * in that frame has just moved.
    */
   teachWorkObject: (id: string, points: [Vector3, Vector3, Vector3]) => boolean;
+
+  /**
+   * The three-point teach in progress, if any.
+   *
+   * Held here rather than in the panel because teaching a frame *requires*
+   * leaving the panel: you touch a point, then move the arm, and moving the arm
+   * lives on another tab. React unmounts the panel when the tab changes, which
+   * threw away every point touched so far - so the one workflow this feature
+   * exists for was the one that could not be completed.
+   */
+  teachingWorkObject: string | null;
+  /** Points touched so far, in base coordinates. */
+  touchedPoints: Vector3[];
+  beginTeaching: (id: string) => void;
+  /** Record where the tool is now as the next point. */
+  touchPoint: () => void;
+  undoTouch: () => void;
+  cancelTeaching: () => void;
+  /** Build the frame from the three touched points. */
+  finishTeaching: () => boolean;
   /**
    * Forget a waypoint's recorded joint angles, so it is solved from its position.
    *
@@ -505,6 +525,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   jogFrame: 'base',
   jogStepMm: 5,
   jogStepDeg: 5,
+  teachingWorkObject: null,
+  touchedPoints: [],
   manualSpeed: 30,
 
   // Trajectory initial state
@@ -1517,6 +1539,71 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     // The path was planned against the old frame.
     if (get().trajectory) get().planTrajectory();
     return true;
+  },
+
+  beginTeaching: (id) => {
+    set({ teachingWorkObject: id, touchedPoints: [] });
+    // Jogging along the fixture's own edges is what the next three touches want,
+    // and it is the frame being taught - so until it is, this is the previous
+    // guess. Selecting it anyway means the axes drawn in the 3D view are the
+    // ones the jog buttons move along, which is the point.
+    set({ activeWorkObject: id });
+    get().logEvent(
+      'info',
+      `Teaching ${frameById(get().workObjects, id).name}: touch the origin, ` +
+        'then a point along +X, then one on the +Y side'
+    );
+  },
+
+  touchPoint: () => {
+    const { teachingWorkObject, touchedPoints, firmwareStatus } = get();
+    if (!teachingWorkObject || touchedPoints.length >= 3) return;
+
+    // A touched point is a measurement of where the tool is. Untrusted, it is a
+    // guess, and a frame built from guesses puts every point taught in it
+    // somewhere nobody chose.
+    if (firmwareStatus && !firmwareStatus.positionTrusted) {
+      get().logEvent(
+        'error',
+        'Not recording that point: the reported position is not trusted until ' +
+          'the arm has been homed.'
+      );
+      return;
+    }
+
+    get().updateCurrentPosition();
+    const position = get().currentPosition;
+    if (!position) {
+      get().logEvent('error', 'No tool position yet');
+      return;
+    }
+
+    set({ touchedPoints: [...touchedPoints, { ...position }] });
+    get().logEvent(
+      'ok',
+      `Point ${touchedPoints.length + 1} of 3 recorded at ` +
+        `${(position.x * 1000).toFixed(1)}, ${(position.y * 1000).toFixed(1)}, ` +
+        `${(position.z * 1000).toFixed(1)} mm`
+    );
+  },
+
+  undoTouch: () => set(state => ({ touchedPoints: state.touchedPoints.slice(0, -1) })),
+
+  cancelTeaching: () => set({ teachingWorkObject: null, touchedPoints: [] }),
+
+  finishTeaching: () => {
+    const { teachingWorkObject, touchedPoints } = get();
+    if (!teachingWorkObject || touchedPoints.length < 3) return false;
+
+    const ok = get().teachWorkObject(teachingWorkObject, [
+      touchedPoints[0],
+      touchedPoints[1],
+      touchedPoints[2]
+    ]);
+    // Kept on a failure, so a rejected third point can be re-touched without
+    // starting the first two again.
+    if (ok) set({ teachingWorkObject: null, touchedPoints: [] });
+    return ok;
   },
 
   dropJointAngles: (id) => {

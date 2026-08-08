@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { BASE_FRAME } from '../kinematics/workObject';
-import { Vector3 } from '../kinematics/types';
+import { CartesianJogPanel } from './CartesianJogPanel';
 
 const DEG = 180 / Math.PI;
 
@@ -27,36 +27,27 @@ export const WorkObjectPanel: React.FC = () => {
     addWorkObject,
     renameWorkObject,
     removeWorkObject,
-    teachWorkObject,
     currentPosition,
     waypoints,
-    toolFrame
+    toolFrame,
+    teachingWorkObject,
+    touchedPoints,
+    beginTeaching,
+    touchPoint,
+    undoTouch,
+    cancelTeaching,
+    finishTeaching
   } = useRobotStore();
 
   const [newName, setNewName] = useState('');
-  const [teaching, setTeaching] = useState<string | null>(null);
-  const [touched, setTouched] = useState<Vector3[]>([]);
 
   const active = workObjects.find(o => o.id === activeWorkObject) ?? null;
 
-  const startTeaching = (id: string) => {
-    setTeaching(id);
-    setTouched([]);
-  };
-
-  const touch = () => {
-    if (!currentPosition) return;
-    setTouched(prev => [...prev, { ...currentPosition }]);
-  };
-
-  const finish = () => {
-    if (!teaching || touched.length < 3) return;
-    const ok = teachWorkObject(teaching, [touched[0], touched[1], touched[2]]);
-    if (ok) {
-      setTeaching(null);
-      setTouched([]);
-    }
-  };
+  // Held in the store, not here. Teaching a frame means touching a point, then
+  // moving the arm, and moving the arm used to mean leaving this tab - which
+  // unmounted the panel and threw away every point touched so far.
+  const teaching = teachingWorkObject;
+  const touched = touchedPoints;
 
   const toolIsBare =
     toolFrame.xyz.x === 0 && toolFrame.xyz.y === 0 && toolFrame.xyz.z === 0;
@@ -121,7 +112,7 @@ export const WorkObjectPanel: React.FC = () => {
                 </span>
                 {untaught && <span className="text-amber-700">untaught</span>}
                 <button
-                  onClick={() => startTeaching(o.id)}
+                  onClick={() => beginTeaching(o.id)}
                   className="px-2 py-1 border rounded hover:bg-gray-50"
                 >
                   Teach
@@ -184,7 +175,7 @@ export const WorkObjectPanel: React.FC = () => {
           )}
 
           <p className="text-xs text-gray-700 mb-2">
-            Jog the tool tip onto {STEP[Math.min(touched.length, 2)]}, then touch.
+            Move the tool tip onto {STEP[Math.min(touched.length, 2)]}, then touch.
           </p>
 
           <ol className="text-xs mb-2 space-y-0.5">
@@ -202,21 +193,21 @@ export const WorkObjectPanel: React.FC = () => {
 
           <div className="flex gap-2">
             <button
-              onClick={touch}
+              onClick={touchPoint}
               disabled={!currentPosition || touched.length >= 3}
               className="flex-1 px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 disabled:bg-gray-300"
             >
               Touch point {Math.min(touched.length + 1, 3)}
             </button>
             <button
-              onClick={finish}
+              onClick={finishTeaching}
               disabled={touched.length < 3}
               className="px-3 py-1 bg-green-700 text-white rounded text-sm hover:bg-green-800 disabled:bg-gray-300"
             >
               Set frame
             </button>
             <button
-              onClick={() => { setTeaching(null); setTouched([]); }}
+              onClick={cancelTeaching}
               className="px-3 py-1 border rounded text-sm hover:bg-gray-50"
             >
               Cancel
@@ -225,12 +216,18 @@ export const WorkObjectPanel: React.FC = () => {
 
           {touched.length > 0 && (
             <button
-              onClick={() => setTouched(prev => prev.slice(0, -1))}
+              onClick={undoTouch}
               className="mt-1 text-xs text-gray-600 underline"
             >
               Undo last touch
             </button>
           )}
+
+          {/* The arm has to be moved between touches, and having to change tabs
+              to do it is what made this workflow awkward in the first place. */}
+          <div className="mt-3 -mx-3 -mb-3 border-t bg-white rounded-b">
+            <CartesianJogPanel />
+          </div>
         </div>
       )}
     </div>
