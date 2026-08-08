@@ -3,6 +3,24 @@
 Status: **design proposal, not implemented**
 Audited against code on 2026-08-08.
 
+> **Revision note.** Section 4 (topology) was written assuming the agent runs on
+> the same machine as the browser and that the arm stays tethered by USB. Two
+> later requirements change that conclusion: the agent lives in a hosted
+> chatbox, and the arm should not need to be plugged into the user's PC.
+>
+> The governing principle becomes *put the network boundary above the planner,
+> not below it* — a small Linux host at the robot runs the planner over a short
+> USB link and exposes the high-level API over the network, rather than tunnelling
+> the serial protocol itself over WiFi. Two findings drive this:
+> `runStage2PlannerInline` already covers the case where `Worker` is undefined,
+> so a Node port gets Stage 2 for free; and the firmware has **no link watchdog**
+> (`SerialProtocol.cpp:763` is a homing timeout only), so a dropped host link
+> mid-queue leaves the arm running to completion.
+>
+> Sections 1–3 and 5–8 (where the intelligence lives, the straight-line
+> requirement, frame semantics, the tool surface, safety, latency and drift) are
+> unaffected. Section 4 is pending a rewrite once the topology is settled.
+
 Question this document answers: *can we expose an API so an external AI agent
 ("Roberto") can drive the arm — so that "move right" produces a real
 straight-line motion to the right?*
