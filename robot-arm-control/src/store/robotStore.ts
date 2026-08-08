@@ -12,8 +12,10 @@ import {
   matrixToRpy,
   multiply3,
   rotationAboutAxis,
-  rpyToMatrix
+  rpyToMatrix,
+  transpose3
 } from '../kinematics/linalg';
+import { AxisAlignment, nearestAxisAligned } from '../kinematics/axisAlign';
 import {
   Waypoint,
   Trajectory,
@@ -228,6 +230,27 @@ interface RobotStore {
   jogAxes: () => number[][] | null;
   /** Turn the tool about one axis of the chosen frame, without moving the tip. */
   jogRotation: (axis: 'x' | 'y' | 'z', degrees: number) => Promise<void>;
+
+  /**
+   * How far the tool is from square with the jog frame's axes, and where
+   * straightening would put it. Null when there is nothing to measure yet, or
+   * when the jog frame is the tool itself.
+   *
+   * Read on every render so the panel can show it live. That live figure is the
+   * point of the feature as much as the button is: "1.4 degrees off" is the
+   * number an operator wants and the one nothing in the app reported before.
+   */
+  alignmentToAxes: () => (AxisAlignment & { reference: string }) | null;
+  /**
+   * Put the tool exactly square with the jog frame's axes, without moving the
+   * tip.
+   *
+   * Jogging cannot get here. A turn jog steps by a fixed amount, so from 1.3
+   * degrees off it reaches 0.3 or -3.7 and never zero, and the solver has no
+   * preference for square over any other attitude - it stops as soon as the
+   * pose is met, wherever that is.
+   */
+  alignToAxes: () => Promise<void>;
   /**
    * Whether the arm may be commanded to move at all, logging why not.
    *
@@ -929,6 +952,91 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     if (!serialManager) return;
     const ack = await serialManager.moveToAngles(toJointAngles(solved.jointAngles), manualSpeed);
     if (!ack.accepted) get().logEvent('error', 'Move refused: firmware queue full');
+  },
+
+  alignmentToAxes: () => {
+    const { jogFrame, currentRotation } = get();
+    if (!currentRotation) return null;
+
+    // Squaring the tool with its own axes is a no-op by definition, so there is
+    // nothing to report rather than an answer of zero - zero would read as
+    // "already straight", which is the opposite of what it means here.
+    if (jogFrame === 'tool') return null;
+
+    const reference = jogFrame === 'work' ? get().activeFrame() : BASE_FRAME;
+    const refInBase = rpyToMatrix(reference.rpy);
+    // The tool seen from the reference frame, which is the frame the answer has
+    // to be square with.
+    const toolInRef = multiply3(transpose3(refInBase), rpyToMatrix(currentRotation));
+
+    return { ...nearestAxisAligned(toolInRef), reference: reference.name };
+  },
+
+  alignToAxes: async () => {
+    const { currentPosition, currentRotation, jogFrame } = get();
+    if (!get().canCommandMotion('the straighten')) return;
+
+    if (!currentPosition || !currentRotation) {
+      get().logEvent('error', 'No tool position yet — connect and home first');
+      return;
+    }
+    if (jogFrame === 'tool') {
+      get().logEvent(
+        'error',
+        'Squaring the tool with its own axes means nothing — pick World or Work object first'
+      );
+      return;
+    }
+
+    const alignment = get().alignmentToAxes();
+    if (!alignment) return;
+
+    const reference = jogFrame === 'work' ? get().activeFrame() : BASE_FRAME;
+    const refInBase = rpyToMatrix(reference.rpy);
+    const target = matrixToRpy(multiply3(refInBase, alignment.rotation));
+
+    get().logEvent(
+      'sent',
+      `straighten to ${reference.name} axes: ${alignment.errorDeg.toFixed(2)}° off, ` +
+        `tool X→${alignment.axes[0]} Y→${alignment.axes[1]} Z→${alignment.axes[2]}`
+    );
+
+    const seed = [
+      get().currentAngles.J1, get().currentAngles.J2, get().currentAngles.J3,
+      get().currentAngles.J4, get().currentAngles.J5, get().currentAngles.J6
+    ];
+    const solved = ikSolver.solvePose({ position: currentPosition, rotation: target }, seed);
+    set({ ikStatus: solved });
+
+    if (!solved.success) {
+      get().logEvent('error', `Cannot straighten there: ${solved.error ?? 'no solution'}`);
+      return;
+    }
+
+    const hit = checkSelfCollision(solved.jointAngles);
+    if (hit.colliding) {
+      get().logEvent('error', `Refusing to straighten: it would put the ${hit.message}.`);
+      return;
+    }
+
+    const { serialManager, manualSpeed } = get();
+    if (!serialManager) return;
+    const ack = await serialManager.moveToAngles(toJointAngles(solved.jointAngles), manualSpeed);
+    if (!ack.accepted) {
+      get().logEvent('error', 'Move refused: firmware queue full');
+      return;
+    }
+
+    // A lock captured before this was holding the crooked attitude, and every
+    // move afterwards would tip the tool back to it. Re-point it at the exact
+    // target rather than at whatever the arm reports on arrival: the reported
+    // attitude carries the solver's residual and the resolution of a step, and
+    // holding that instead would bake a fraction of a degree of crookedness
+    // into every subsequent move.
+    if (get().toolLocked) {
+      set({ lockedRotation: { ...target } });
+      get().logEvent('info', 'Tool lock now holds the squared attitude');
+    }
   },
 
   jogJoint: async (joint, deltaDegrees) => {

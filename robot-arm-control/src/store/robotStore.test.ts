@@ -14,7 +14,8 @@ import { SerialManager } from '../communication/SerialManager';
 import { ConnectionStatus, RobotState } from '../types/robot';
 import { ExecutionState, Waypoint } from '../motion/types';
 import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG, resolveWaypoint } from '../motion/TrajectoryPlanner';
-import { rotationLog, multiply3, transpose3 } from '../kinematics/linalg';
+import { rotationLog, multiply3, rpyToMatrix, transpose3 } from '../kinematics/linalg';
+import { nearestAxisAligned } from '../kinematics/axisAlign';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { JOINT_LIMITS_DEG, HOME_POSE_DEG, degToRad } from '../kinematics/robotModel';
 import { FakePort, FakeSerial, commandsOfType } from '../testUtils/fakeSerial';
@@ -1365,6 +1366,150 @@ describe('store: jogging the tool', () => {
 
     const before = commandsOfType(port, 'J ').length;
     await useRobotStore.getState().jogCartesian('z', 20);
+    await settle(50);
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('store: squaring the tool with the axes', () => {
+  /** Where the arm ended up, from the last J command it was sent. */
+  const landed = (port: FakePort) => {
+    const moves = commandsOfType(port, 'J ');
+    const angles = moves[moves.length - 1].split(/\s+/).slice(1, 7).map(Number);
+    return {
+      position: ForwardKinematics.position(angles),
+      rotation: ForwardKinematics.solveRad(degToRad(angles)).rotation
+    };
+  };
+
+  const startClear = () => {
+    const q = [...HOME_POSE_DEG];
+    q[4] = 151;
+    useRobotStore.setState({
+      currentAngles: { J1: q[0], J2: q[1], J3: q[2], J4: q[3], J5: q[4], J6: q[5] }
+    });
+    useRobotStore.getState().updateCurrentPosition();
+    return q;
+  };
+
+  it('lands on an attitude that is actually square, not merely closer', async () => {
+    const { port } = await connectStore();
+    startClear();
+    useRobotStore.getState().setJogFrame('base');
+
+    const before = useRobotStore.getState().alignmentToAxes()!;
+    // The premise: the arm does not start square, so there is something to fix.
+    expect(before.errorDeg).toBeGreaterThan(1);
+
+    await useRobotStore.getState().alignToAxes();
+    await settle(100);
+
+    // Every axis of the tool now lies along a world axis, to the accuracy the
+    // solver reaches. Checked on the matrix rather than on the reported error,
+    // so a bug in the measurement cannot hide a bug in the move.
+    const R = landed(port).rotation;
+    for (let r = 0; r < 3; r++) {
+      for (let c = 0; c < 3; c++) {
+        const v = Math.abs(R[r][c]);
+        expect(Math.min(v, Math.abs(1 - v))).toBeLessThan(0.002);
+      }
+    }
+  });
+
+  it('leaves the tip where it was', async () => {
+    const { port } = await connectStore();
+    startClear();
+    useRobotStore.getState().setJogFrame('base');
+    const from = useRobotStore.getState().currentPosition!;
+
+    await useRobotStore.getState().alignToAxes();
+    await settle(100);
+
+    const end = landed(port).position;
+    expect(
+      Math.hypot(end.x - from.x, end.y - from.y, end.z - from.z) * 1000
+    ).toBeLessThan(0.5);
+  });
+
+  it('squares with the fixture, not the world, when a work object is active', async () => {
+    const { port } = await connectStore();
+    startClear();
+
+    // A jig turned 30 degrees about Z. Square with it is 30 degrees off square
+    // with the world, so the two cannot be confused for one another.
+    const p = ForwardKinematics.position([...HOME_POSE_DEG]);
+    const turn = (30 * Math.PI) / 180;
+    const id = useRobotStore.getState().addWorkObject('Angled jig');
+    expect(
+      useRobotStore.getState().teachWorkObject(id, [
+        { x: p.x, y: p.y, z: p.z },
+        { x: p.x + 0.1 * Math.cos(turn), y: p.y + 0.1 * Math.sin(turn), z: p.z },
+        { x: p.x - 0.1 * Math.sin(turn), y: p.y + 0.1 * Math.cos(turn), z: p.z }
+      ])
+    ).toBe(true);
+
+    useRobotStore.getState().setJogFrame('work');
+    await useRobotStore.getState().alignToAxes();
+    await settle(100);
+
+    // Square with the jig...
+    const R = landed(port).rotation;
+    const jig = rpyToMatrix(useRobotStore.getState().activeFrame().rpy);
+    const inJig = multiply3(transpose3(jig), R);
+    expect(nearestAxisAligned(inJig).errorDeg).toBeLessThan(0.2);
+    // ...and therefore not square with the world.
+    expect(nearestAxisAligned(R).errorDeg).toBeGreaterThan(20);
+  });
+
+  it('has nothing to say about squaring the tool with itself', async () => {
+    const { port } = await connectStore();
+    startClear();
+    useRobotStore.getState().setJogFrame('tool');
+
+    expect(useRobotStore.getState().alignmentToAxes()).toBeNull();
+
+    const before = commandsOfType(port, 'J ').length;
+    await useRobotStore.getState().alignToAxes();
+    await settle(50);
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(before);
+    expect(useRobotStore.getState().events.at(-1)!.text).toMatch(/own axes/i);
+  });
+
+  it('moves an existing tool lock onto the squared attitude', async () => {
+    // Without this the lock still holds the crooked attitude it was captured at,
+    // and the next Cartesian move quietly tips the tool back to it - undoing the
+    // straighten with no message and no obvious cause.
+    const { port } = await connectStore();
+    startClear();
+    useRobotStore.getState().setJogFrame('base');
+    useRobotStore.getState().setToolLocked(true);
+
+    const held = useRobotStore.getState().lockedRotation!;
+    await useRobotStore.getState().alignToAxes();
+    await settle(100);
+
+    const now = useRobotStore.getState().lockedRotation!;
+    expect(now).not.toEqual(held);
+    // And it holds square exactly, rather than the arm's rounded-to-a-step
+    // report of square, which would bake a fraction of a degree into every
+    // later move.
+    expect(nearestAxisAligned(rpyToMatrix(now)).errorDeg).toBeLessThan(1e-9);
+  });
+
+  it('refuses to straighten an arm whose position is not trusted', async () => {
+    const { port } = await connectStore();
+    startClear();
+    useRobotStore.getState().setJogFrame('base');
+
+    port.push('STATUS IDLE 23 0 0 30 1\n');
+    await flush();
+
+    const before = commandsOfType(port, 'J ').length;
+    await useRobotStore.getState().alignToAxes();
     await settle(50);
 
     expect(commandsOfType(port, 'J ')).toHaveLength(before);

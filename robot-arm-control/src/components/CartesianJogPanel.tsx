@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { ConnectionStatus } from '../types/robot';
+import { SQUARE_ENOUGH_DEG } from '../kinematics/axisAlign';
 
 /**
  * Nudging the tool in a straight line, a fixed distance at a time.
@@ -30,6 +31,8 @@ export const CartesianJogPanel: React.FC = () => {
     setJogStepDeg,
     jogCartesian,
     jogRotation,
+    alignmentToAxes,
+    alignToAxes,
     connectionStatus,
     firmwareStatus,
     currentPosition,
@@ -60,6 +63,9 @@ export const CartesianJogPanel: React.FC = () => {
       setBusy(false);
     }
   };
+
+  const alignment = alignmentToAxes();
+  const square = alignment !== null && alignment.errorDeg < SQUARE_ENOUGH_DEG;
 
   const move = (axis: 'x' | 'y' | 'z', sign: 1 | -1) =>
     run(() => jogCartesian(axis, sign * jogStepMm));
@@ -198,6 +204,61 @@ export const CartesianJogPanel: React.FC = () => {
           {pair('y', 'RY', 'RY', 'RY', turn)}
           {pair('z', 'RZ', 'RZ', 'RZ', turn)}
         </div>
+      </div>
+
+      {/* Square with the axes. Jogging cannot land here: a fixed step reaches
+          0.3 degrees or -3.7, never zero. */}
+      <div className="mb-3 pt-3 border-t">
+        <label className="block text-xs text-gray-600 mb-1">Square with the axes</label>
+
+        {alignment === null ? (
+          <p className="text-xs text-gray-500">
+            {jogFrame === 'tool'
+              ? "Squaring the tool with its own axes means nothing. Pick World or Work object above."
+              : 'No tool orientation reported yet.'}
+          </p>
+        ) : (
+          <>
+            <div className="flex items-baseline gap-2">
+              <span
+                className={`font-mono text-lg font-semibold ${
+                  square ? 'text-green-700' : 'text-gray-800'
+                }`}
+              >
+                {alignment.errorDeg.toFixed(2)}°
+              </span>
+              <span className="text-xs text-gray-500">
+                off the {alignment.reference} axes
+              </span>
+            </div>
+            <p className="text-xs mb-1 text-gray-500">
+              {square
+                ? `Square to within what the steppers resolve — J6 moves in steps of
+                   0.11°, so nothing below ${SQUARE_ENOUGH_DEG}° can be commanded away.`
+                : 'Jogging cannot reach zero from here — a fixed step lands either side of it.'}
+            </p>
+
+            <button
+              onClick={() => run(alignToAxes)}
+              disabled={blocked !== null || busy || square}
+              className="w-full px-3 py-2 rounded font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 mb-1"
+            >
+              Straighten
+            </button>
+
+            {/* Square is not the same as upright: there are 24 square attitudes
+                and the nearest may not be the one in mind. Cheaper to read it
+                here than to watch the arm find out. */}
+            <p className="text-xs text-gray-500 font-mono">
+              tool X→{alignment.axes[0]} &nbsp; Y→{alignment.axes[1]} &nbsp; Z→
+              {alignment.axes[2]}
+            </p>
+            <p className="text-xs text-gray-500 mt-1">
+              The tip stays put. Lock the orientation afterwards to hold it
+              through everything that follows.
+            </p>
+          </>
+        )}
       </div>
 
       <p className="text-xs text-gray-500">
