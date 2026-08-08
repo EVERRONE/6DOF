@@ -169,3 +169,61 @@ describe('solving for the tool tip', () => {
     expect(after.offset.z).toBeCloseTo(before.offset.z, 9);
   });
 });
+
+describe('judging whether the answer means anything', () => {
+  it('calls a real tool measured', () => {
+    const { touches } = touchesFor({ x: 0.012, y: -0.008, z: 0.095 }, spreadPoses());
+    const result = solveToolOffset(touches);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.verdict.kind).toBe('good');
+  });
+
+  it('calls an offset smaller than its own scatter noise', () => {
+    // What a real session produced: a 5.2 mm offset with 3 mm of disagreement.
+    // Least squares always returns something; that does not make it a tool.
+    const truth = { x: -0.0025, y: 0.00255, z: -0.00383 };
+    const { touches } = touchesFor(truth, spreadPoses());
+
+    // Scatter the touches by a couple of millimetres, as an operator aiming at a
+    // nail with a printed arm does.
+    const jitter = [
+      { x: 0.002, y: -0.001, z: 0.0015 },
+      { x: -0.0018, y: 0.002, z: -0.001 },
+      { x: 0.001, y: 0.0015, z: 0.002 },
+      { x: -0.001, y: -0.002, z: -0.0015 }
+    ];
+    touches.forEach((t, i) => {
+      t.position = {
+        x: t.position.x + jitter[i].x,
+        y: t.position.y + jitter[i].y,
+        z: t.position.z + jitter[i].z
+      };
+    });
+
+    const result = solveToolOffset(touches);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.residualMm).toBeGreaterThan(1);
+    expect(result.verdict.kind).toBe('in-the-noise');
+    expect(result.verdict.note).toMatch(/bare flange/i);
+  });
+
+  it('calls a large offset from close-together touches soft rather than good', () => {
+    const base = [...HOME_POSE_DEG];
+    // Above the 20 degree refusal, below the 60 that makes it solid.
+    const { touches } = touchesFor({ x: 0, y: 0, z: 0.09 }, [
+      [...base],
+      [base[0], base[1], base[2], base[3] - 12, base[4] + 8, base[5]],
+      [base[0], base[1], base[2], base[3] + 10, base[4] - 9, base[5]],
+      [base[0], base[1], base[2], base[3] - 5, base[4] + 14, base[5]]
+    ]);
+
+    const result = solveToolOffset(touches);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.spreadDeg).toBeLessThan(60);
+    expect(result.verdict.kind).toBe('poorly-conditioned');
+  });
+});

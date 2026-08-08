@@ -42,8 +42,54 @@ export type ToolCalibration =
       residualMm: number;
       /** Largest angle between any two of the touch orientations, degrees. */
       spreadDeg: number;
+      /**
+       * What the result is worth, judged against its own residual.
+       *
+       * A solve always returns numbers. Whether they mean anything is a separate
+       * question, and it is the one an operator needs answered - reading a
+       * 5.2 mm offset next to a 3 mm residual as "the tool sticks out 5 mm" is
+       * the mistake this exists to prevent.
+       */
+      verdict: ToolVerdict;
     }
   | { ok: false; reason: string };
+
+export type ToolVerdict =
+  | {
+      kind: 'good';
+      note: string;
+    }
+  | {
+      kind: 'in-the-noise';
+      /** Why the offset cannot be told apart from a bare flange. */
+      note: string;
+    }
+  | {
+      kind: 'poorly-conditioned';
+      note: string;
+    };
+
+/**
+ * How much bigger the offset has to be than the residual before it means
+ * anything.
+ *
+ * The residual is how far the four touches disagree about where the tip was. An
+ * offset smaller than that is a difference the measurement cannot see: the
+ * solver reports it because least squares always reports something, not because
+ * it found it. Three is a modest bar - it says the answer stands clear of its
+ * own scatter, not that it is precise.
+ */
+const OFFSET_OVER_RESIDUAL = 3;
+
+/**
+ * Orientation spread below which the answer is soft even when it is large.
+ *
+ * The offset along the direction the touches share is the least determined part,
+ * and the less the wrist turned between them the worse it is. Twenty degrees is
+ * the point below which the answer is meaningless; sixty is the point above
+ * which it is solid. Between them it is worth having and worth repeating.
+ */
+const COMFORTABLE_SPREAD_DEG = 60;
 
 /** Angle between two orientations, in degrees. */
 function angleBetween(a: number[][], b: number[][]): number {
@@ -154,5 +200,35 @@ export function solveToolOffset(touches: ToolTouch[]): ToolCalibration {
     };
   }
 
-  return { ok: true, offset, point, residualMm: residual, spreadDeg: spread };
+  const reach = Math.hypot(offset.x, offset.y, offset.z) * 1000;
+
+  let verdict: ToolVerdict;
+  if (reach < OFFSET_OVER_RESIDUAL * residual) {
+    verdict = {
+      kind: 'in-the-noise',
+      note:
+        `The tip works out ${reach.toFixed(1)} mm from the flange, but the four ` +
+        `touches only agree to ${residual.toFixed(1)} mm. That is not a measurement ` +
+        'of a tool - it is indistinguishable from a bare flange. Either the ' +
+        'touches were not all on the same physical point, or they were not made ' +
+        'with the tip of the tool.'
+    };
+  } else if (spread < COMFORTABLE_SPREAD_DEG) {
+    verdict = {
+      kind: 'poorly-conditioned',
+      note:
+        `Usable, but the touches were only ${spread.toFixed(0)}° apart. The offset ` +
+        'along the direction they share is the least certain part of the answer. ' +
+        'Turning the wrist further between touches sharpens it.'
+    };
+  } else {
+    verdict = {
+      kind: 'good',
+      note:
+        `${reach.toFixed(1)} mm from the flange, from touches ${spread.toFixed(0)}° ` +
+        `apart agreeing to ${residual.toFixed(2)} mm.`
+    };
+  }
+
+  return { ok: true, offset, point, residualMm: residual, spreadDeg: spread, verdict };
 }

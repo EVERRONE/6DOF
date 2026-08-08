@@ -209,12 +209,29 @@ export const ToolFramePanel: React.FC = () => {
           <p className="mt-2 text-xs text-red-700">{toolCalibration.reason}</p>
         )}
         {toolCalibration && toolCalibration.ok && (
-          <p className="mt-2 text-xs text-green-800">
-            Touches agree to <strong>{toolCalibration.residualMm.toFixed(2)} mm</strong>,
-            taken {toolCalibration.spreadDeg.toFixed(0)}° apart. That figure is your
-            aim, the arm&apos;s repeatability and the model&apos;s fidelity added
-            together — the first real number for how good this arm is.
-          </p>
+          <div
+            className={`mt-2 text-xs p-2 rounded ${
+              toolCalibration.verdict.kind === 'good'
+                ? 'bg-green-50 text-green-900'
+                : toolCalibration.verdict.kind === 'poorly-conditioned'
+                  ? 'bg-amber-50 text-amber-900'
+                  : 'bg-red-50 text-red-900'
+            }`}
+          >
+            <p className="font-semibold mb-1">
+              {toolCalibration.verdict.kind === 'good'
+                ? 'Measured'
+                : toolCalibration.verdict.kind === 'poorly-conditioned'
+                  ? 'Usable, but soft'
+                  : 'Not a measurement — nothing applied'}
+            </p>
+            <p>{toolCalibration.verdict.note}</p>
+            <p className="mt-1 text-gray-600">
+              The <strong>{toolCalibration.residualMm.toFixed(2)} mm</strong> is your
+              aim, the arm&apos;s repeatability and the model&apos;s fidelity added
+              together. Nothing else measured on this arm reports any of them.
+            </p>
+          </div>
         )}
       </div>
 

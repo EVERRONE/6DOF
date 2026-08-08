@@ -1095,15 +1095,23 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       return result;
     }
 
+    // An answer smaller than its own scatter is not a tool measurement, and
+    // writing it in would be worse than leaving the frame alone: it looks like a
+    // calibration, so nobody repeats it. Reported and refused instead, with the
+    // touches kept so more can be added.
+    if (result.verdict.kind === 'in-the-noise') {
+      get().logEvent('error', `Tool calibration: ${result.verdict.note}`);
+      return result;
+    }
+
     // Only the offset. The rotation is a different measurement and needs a
     // gauge; leaving it alone means a calibration cannot silently undo one.
     get().setToolFrame({ xyz: result.offset });
     set({ calibratingTool: false, toolTouches: [] });
 
     get().logEvent(
-      'ok',
-      `Tool tip is ${(Math.hypot(result.offset.x, result.offset.y, result.offset.z) * 1000).toFixed(1)} mm ` +
-        `from the flange, touches agreeing to ${result.residualMm.toFixed(2)} mm`
+      result.verdict.kind === 'good' ? 'ok' : 'info',
+      `Tool calibration: ${result.verdict.note}`
     );
     return result;
   },

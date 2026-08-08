@@ -1539,3 +1539,42 @@ describe('store: finding the tool tip by touching', () => {
     useRobotStore.getState().resetToolFrame();
   });
 });
+
+describe('store: a tool calibration that is only noise', () => {
+  it('is reported and refused rather than written into the tool frame', async () => {
+    await connectStore();
+    useRobotStore.getState().beginToolCalibration();
+
+    // Four poses well apart, but each touch of a *different* point - which is
+    // what a shaky aim at a nail amounts to. The solve returns an offset far
+    // smaller than the disagreement between the touches.
+    const b = [...HOME_POSE_DEG];
+    for (const q of [
+      [...b],
+      [b[0], b[1], b[2], b[3] - 40, b[4] + 30, b[5]],
+      [b[0], b[1], b[2], b[3] + 35, b[4] - 25, b[5] + 40],
+      [b[0] + 20, b[1], b[2], b[3], b[4] + 45, b[5] - 30]
+    ]) {
+      useRobotStore.setState({
+        currentAngles: { J1: q[0], J2: q[1], J3: q[2], J4: q[3], J5: q[4], J6: q[5] }
+      });
+      useRobotStore.getState().touchToolPoint();
+    }
+
+    const result = useRobotStore.getState().finishToolCalibration();
+    if (result.ok && result.verdict.kind === 'in-the-noise') {
+      // Nothing applied, and the touches kept so more can be added.
+      expect(useRobotStore.getState().toolFrame.xyz).toEqual({ x: 0, y: 0, z: 0 });
+      expect(useRobotStore.getState().calibratingTool).toBe(true);
+      expect(useRobotStore.getState().toolTouches).toHaveLength(4);
+      expect(
+        useRobotStore.getState().events.some(
+          e => e.kind === 'error' && /bare flange/i.test(e.text)
+        )
+      ).toBe(true);
+    } else {
+      // Rejected outright is also a correct answer for touches of four points.
+      expect(result.ok).toBe(false);
+    }
+  });
+});
