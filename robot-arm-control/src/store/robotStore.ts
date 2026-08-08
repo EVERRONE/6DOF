@@ -6,6 +6,7 @@ import { Vector3, Rotation3, IKResult } from '../kinematics/types';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
 import { checkSelfCollision, firstCollidingPoint } from '../kinematics/CollisionChecker';
+import { matrixToRpy, multiply3, rotationAboutAxis, rpyToMatrix } from '../kinematics/linalg';
 import {
   Waypoint,
   Trajectory,
@@ -183,6 +184,49 @@ interface RobotStore {
   syncTargetsToCurrent: () => void;
   /** Move one joint by a relative amount, from the current target. */
   jogJoint: (joint: keyof JointAngles, deltaDegrees: number) => Promise<void>;
+
+  /**
+   * Which axes a Cartesian jog moves along.
+   *
+   * `base`  the world. Z is up, and that is the only one of the three that
+   *         means the same thing wherever the arm is standing.
+   * `tool`  the tool's own axes, so "down" is into whatever it is pointing at
+   *         rather than towards the floor. What you want when approaching a
+   *         surface at an angle.
+   * `work`  the active work object's axes, so a jog runs along the fixture's
+   *         own edges. What you want when touching its three points.
+   */
+  jogFrame: 'base' | 'tool' | 'work';
+  setJogFrame: (frame: 'base' | 'tool' | 'work') => void;
+  /** Step size for a Cartesian jog, in millimetres. */
+  jogStepMm: number;
+  setJogStepMm: (mm: number) => void;
+  /** Step size for a rotary jog, in degrees. */
+  jogStepDeg: number;
+  setJogStepDeg: (deg: number) => void;
+
+  /**
+   * Move the tool a fixed distance along one axis of the chosen frame, holding
+   * its orientation.
+   *
+   * Holding the orientation is not optional here even though it costs reach. A
+   * jog is a translation: "5 mm up" that also tips the tool 3 degrees is not a
+   * jog, it is a surprise, and it is exactly what an unconstrained solve does -
+   * measured at 8 degrees for a 20 mm move in Z from the parked pose.
+   */
+  jogCartesian: (axis: 'x' | 'y' | 'z', millimetres: number) => Promise<void>;
+  /** The jog frame's axes as columns of a rotation matrix, in base coordinates. */
+  jogAxes: () => number[][] | null;
+  /** Turn the tool about one axis of the chosen frame, without moving the tip. */
+  jogRotation: (axis: 'x' | 'y' | 'z', degrees: number) => Promise<void>;
+  /**
+   * Whether the arm may be commanded to move at all, logging why not.
+   *
+   * Shared rather than repeated per entry point. Jogging was added by calling
+   * moveAlongLine directly and inherited none of moveToPosition's checks, which
+   * is exactly how a guard that lives in one caller gets missed by the next.
+   */
+  canCommandMotion: (what: string) => boolean;
   /** Move to the post-homing rest pose. */
   goToHomePose: () => Promise<void>;
   /** Send a raw protocol line, for bring-up and diagnostics. */
@@ -458,6 +502,9 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   activeWorkObject: null,
   ioState: null,
   ioNames: { outputs: [], inputs: [] },
+  jogFrame: 'base',
+  jogStepMm: 5,
+  jogStepDeg: 5,
   manualSpeed: 30,
 
   // Trajectory initial state
@@ -709,6 +756,127 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
    * position, so pressing +5 three times moves 15 degrees even while the arm is
    * still catching up.
    */
+  setJogFrame: (frame) => set({ jogFrame: frame }),
+  setJogStepMm: (mm) => set({ jogStepMm: Math.max(0.01, Math.min(200, mm)) }),
+  setJogStepDeg: (deg) => set({ jogStepDeg: Math.max(0.1, Math.min(90, deg)) }),
+
+  /**
+   * The chosen frame's axes, expressed in base coordinates.
+   *
+   * Columns of a rotation matrix, so column k is that frame's k-th axis seen
+   * from the robot. Which is why a jog "along X" is the same operation in all
+   * three frames and only the matrix differs.
+   */
+  jogAxes: () => {
+    const { jogFrame, currentRotation } = get();
+
+    if (jogFrame === 'tool') {
+      // Where the tool actually points, which after a tool frame is measured is
+      // not where the flange points.
+      return currentRotation ? rpyToMatrix(currentRotation) : null;
+    }
+    if (jogFrame === 'work') {
+      return rpyToMatrix(get().activeFrame().rpy);
+    }
+    return [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1]
+    ];
+  },
+
+  jogCartesian: async (axis, millimetres) => {
+    const { currentPosition, currentRotation, jogFrame } = get();
+
+    if (!currentPosition || !currentRotation) {
+      get().logEvent('error', 'No tool position yet — connect and home first');
+      return;
+    }
+
+    const R = get().jogAxes();
+    if (!R) {
+      get().logEvent('error', 'No tool orientation yet');
+      return;
+    }
+
+    const k = { x: 0, y: 1, z: 2 }[axis];
+    const step = millimetres / 1000;
+    const target = {
+      x: currentPosition.x + R[0][k] * step,
+      y: currentPosition.y + R[1][k] * step,
+      z: currentPosition.z + R[2][k] * step
+    };
+
+    set({ targetPosition: target });
+    get().logEvent(
+      'sent',
+      `jog ${millimetres > 0 ? '+' : ''}${millimetres} mm along ${jogFrame} ${axis.toUpperCase()}`
+    );
+
+    // Straight line with the attitude held, which is what a jog means. Reuses
+    // the move the Cartesian panel makes, so a jog gets the same treatment: the
+    // line is sampled and solved rather than end-point solved, collisions are
+    // checked at every sample, and a wrist that has to reconfigure is turned
+    // first rather than flipping mid-move.
+    await get().moveAlongLine(target, { ...currentRotation });
+  },
+
+  jogRotation: async (axis, degrees) => {
+    const { currentPosition, currentRotation, jogFrame } = get();
+
+    if (!get().canCommandMotion('the turn')) return;
+
+    if (!currentPosition || !currentRotation) {
+      get().logEvent('error', 'No tool position yet — connect and home first');
+      return;
+    }
+
+    const R = get().jogAxes();
+    if (!R) return;
+
+    const k = { x: 0, y: 1, z: 2 }[axis];
+    const about = { x: R[0][k], y: R[1][k], z: R[2][k] };
+    const delta = rotationAboutAxis(about, (degrees * Math.PI) / 180);
+
+    // Applied on the left: `about` is already expressed in base coordinates, so
+    // this turns the tool about that world direction whichever frame the
+    // direction came from. Composing on the right would apply it in the tool's
+    // own frame a second time, and a jog in the base frame would then follow the
+    // tool around.
+    const next = matrixToRpy(multiply3(delta, rpyToMatrix(currentRotation)));
+
+    get().logEvent(
+      'sent',
+      `turn ${degrees > 0 ? '+' : ''}${degrees}° about ${jogFrame} ${axis.toUpperCase()}`
+    );
+
+    // Same place, new attitude. moveAlongLine needs a line, and there is none -
+    // so this is a pose solve and a single move, which is correct here: the tip
+    // is meant to stay put, and nothing is being traced.
+    const seed = [
+      get().currentAngles.J1, get().currentAngles.J2, get().currentAngles.J3,
+      get().currentAngles.J4, get().currentAngles.J5, get().currentAngles.J6
+    ];
+    const solved = ikSolver.solvePose({ position: currentPosition, rotation: next }, seed);
+    set({ ikStatus: solved });
+
+    if (!solved.success) {
+      get().logEvent('error', `Cannot turn there: ${solved.error ?? 'no solution'}`);
+      return;
+    }
+
+    const hit = checkSelfCollision(solved.jointAngles);
+    if (hit.colliding) {
+      get().logEvent('error', `Refusing the turn: it would put the ${hit.message}.`);
+      return;
+    }
+
+    const { serialManager, manualSpeed } = get();
+    if (!serialManager) return;
+    const ack = await serialManager.moveToAngles(toJointAngles(solved.jointAngles), manualSpeed);
+    if (!ack.accepted) get().logEvent('error', 'Move refused: firmware queue full');
+  },
+
   jogJoint: async (joint, deltaDegrees) => {
     const { serialManager, targetAngles, manualSpeed } = get();
     if (!serialManager) return;
@@ -894,22 +1062,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     } = get();
     if (!serialManager) return;
 
-    // Same reasoning as running a path: a Cartesian target is turned into
-    // absolute joint angles, so it only means anything if the arm and the
-    // firmware agree on where the arm is.
-    if (firmwareStatus && !firmwareStatus.positionTrusted) {
-      get().logEvent(
-        'error',
-        'Refusing the Cartesian move: the arm has not been homed since power-up, ' +
-          'or lost its datum to a stop.'
-      );
-      return;
-    }
-
-    if (firmwareStatus && !firmwareStatus.enabled) {
-      get().logEvent('error', 'Refusing the Cartesian move: the motors are off (E 1)');
-      return;
-    }
+    if (!get().canCommandMotion('the Cartesian move')) return;
 
     // Use current joint angles as initial guess for IK
     const initialGuess = [
@@ -996,6 +1149,30 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
    * leaves the firmware only a 2 mm gap to fill, where the same proportional
    * interpolation cannot go far wrong. The same move then holds 0.29 degrees.
    */
+  canCommandMotion: (what) => {
+    const { firmwareStatus } = get();
+
+    // A Cartesian target becomes absolute joint angles, so it only means
+    // anything if the arm and the firmware agree on where the arm is. Untrusted
+    // - not homed since power-up, or steps possibly lost to a stop - those
+    // angles are measured from a datum that does not exist.
+    if (firmwareStatus && !firmwareStatus.positionTrusted) {
+      get().logEvent(
+        'error',
+        `Refusing ${what}: the arm has not been homed since power-up, or lost ` +
+          'its datum to a stop.'
+      );
+      return false;
+    }
+
+    if (firmwareStatus && !firmwareStatus.enabled) {
+      get().logEvent('error', `Refusing ${what}: the motors are off (E 1)`);
+      return false;
+    }
+
+    return true;
+  },
+
   waitUntilIdle: async (since, aborted) => {
     for (let attempt = 0; attempt < 3000; attempt++) {
       if (aborted()) return;
@@ -1008,6 +1185,12 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   moveAlongLine: async (position, orientation) => {
     const { serialManager, currentAngles, cartesianSpeed, cartesianAccel, manualSpeed } = get();
     if (!serialManager) return;
+
+    // Guarded here and not only in moveToPosition. This is a public action that
+    // commands the arm, and jogging calls it directly - so relying on the
+    // caller's checks meant a jog moved an arm whose datum nobody trusted,
+    // which is the one thing every other entry point refuses to do.
+    if (!get().canCommandMotion('the move')) return;
 
     const startAngles = [
       currentAngles.J1, currentAngles.J2, currentAngles.J3,

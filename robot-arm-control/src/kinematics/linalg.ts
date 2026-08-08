@@ -378,6 +378,27 @@ export function slerp(a: Quaternion, b: Quaternion, t: number): Quaternion {
   };
 }
 
+/**
+ * Rotation of `angle` about an arbitrary unit axis, by Rodrigues' formula.
+ *
+ * Used for jogging: "turn 5 degrees about the tool's own Y" needs a rotation
+ * about a direction that is not a coordinate axis, which the rpy helpers cannot
+ * express without first decomposing something they would then recompose.
+ */
+export function rotationAboutAxis(axis: Vector3, angle: number): number[][] {
+  const n = Math.hypot(axis.x, axis.y, axis.z) || 1;
+  const x = axis.x / n, y = axis.y / n, z = axis.z / n;
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const t = 1 - c;
+
+  return [
+    [t * x * x + c,     t * x * y - s * z, t * x * z + s * y],
+    [t * x * y + s * z, t * y * y + c,     t * y * z - s * x],
+    [t * x * z - s * y, t * y * z + s * x, t * z * z + c]
+  ];
+}
+
 /** Angle between two orientations, in radians. */
 export function angleBetweenQuat(a: Quaternion, b: Quaternion): number {
   const dot = Math.abs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z);

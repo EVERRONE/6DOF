@@ -143,6 +143,9 @@ beforeEach(() => {
     activeWorkObject: null,
     ioState: null,
     ioNames: { outputs: [], inputs: [] },
+    jogFrame: 'base',
+    jogStepMm: 5,
+    jogStepDeg: 5,
     currentAngles: {
       J1: HOME_POSE_DEG[0], J2: HOME_POSE_DEG[1], J3: HOME_POSE_DEG[2],
       J4: HOME_POSE_DEG[3], J5: HOME_POSE_DEG[4], J6: HOME_POSE_DEG[5]
@@ -1253,5 +1256,112 @@ describe('store: digital I/O', () => {
     await run;
 
     expect(port.written.join('')).not.toContain('O ');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('store: jogging the tool', () => {
+  /** Where the arm ends up, from the last J command it was sent. */
+  const landed = (port: FakePort) => {
+    const moves = commandsOfType(port, 'J ');
+    const angles = moves[moves.length - 1].split(/\s+/).slice(1, 7).map(Number);
+    return {
+      position: ForwardKinematics.position(angles),
+      rotation: ForwardKinematics.solveRad(degToRad(angles)).rotation
+    };
+  };
+
+  const startClear = () => {
+    // Clear of the wrist singularity, so the jog is not refused for a reason
+    // that has nothing to do with jogging.
+    const q = [...HOME_POSE_DEG];
+    q[4] = 151;
+    useRobotStore.setState({
+      currentAngles: { J1: q[0], J2: q[1], J3: q[2], J4: q[3], J5: q[4], J6: q[5] }
+    });
+    useRobotStore.getState().updateCurrentPosition();
+    return q;
+  };
+
+  it('moves the tool by the distance asked, along the world axis', async () => {
+    const { port } = await connectStore();
+    startClear();
+    const from = useRobotStore.getState().currentPosition!;
+
+    useRobotStore.getState().setJogFrame('base');
+    await useRobotStore.getState().jogCartesian('z', 20);
+    await settle(400);
+
+    const end = landed(port);
+    expect((end.position.z - from.z) * 1000).toBeCloseTo(20, 1);
+    // And only along that axis.
+    expect(Math.abs(end.position.x - from.x) * 1000).toBeLessThan(0.5);
+    expect(Math.abs(end.position.y - from.y) * 1000).toBeLessThan(0.5);
+  });
+
+  it('holds the tool angle, which is what makes it a jog', async () => {
+    const { port } = await connectStore();
+    const q = startClear();
+    const before = ForwardKinematics.solveRad(degToRad(q)).rotation;
+
+    useRobotStore.getState().setJogFrame('base');
+    await useRobotStore.getState().jogCartesian('z', 20);
+    await settle(400);
+
+    // Unconstrained, a 20 mm move in Z tips the tool 8 degrees.
+    const w = rotationLog(multiply3(landed(port).rotation, transpose3(before)));
+    expect((Math.hypot(w.x, w.y, w.z) * 180) / Math.PI).toBeLessThan(0.5);
+  });
+
+  it('follows the tool own axes when asked to', async () => {
+    const { port } = await connectStore();
+    const q = startClear();
+    const from = useRobotStore.getState().currentPosition!;
+    const R = ForwardKinematics.solveRad(degToRad(q)).rotation;
+
+    useRobotStore.getState().setJogFrame('tool');
+    await useRobotStore.getState().jogCartesian('z', 20);
+    await settle(400);
+
+    // 20 mm along the tool's own Z, expressed in base coordinates. This is a
+    // different direction from world Z unless the tool happens to point up.
+    const end = landed(port);
+    expect((end.position.x - from.x) * 1000).toBeCloseTo(R[0][2] * 20, 0);
+    expect((end.position.y - from.y) * 1000).toBeCloseTo(R[1][2] * 20, 0);
+    expect((end.position.z - from.z) * 1000).toBeCloseTo(R[2][2] * 20, 0);
+  });
+
+  it('turns the tool without moving the tip', async () => {
+    const { port } = await connectStore();
+    const q = startClear();
+    const from = useRobotStore.getState().currentPosition!;
+    const before = ForwardKinematics.solveRad(degToRad(q)).rotation;
+
+    useRobotStore.getState().setJogFrame('tool');
+    await useRobotStore.getState().jogRotation('z', 10);
+    await settle(100);
+
+    const end = landed(port);
+    const w = rotationLog(multiply3(end.rotation, transpose3(before)));
+    expect((Math.hypot(w.x, w.y, w.z) * 180) / Math.PI).toBeCloseTo(10, 0);
+    // The tip is the thing that must not move.
+    expect(
+      Math.hypot(end.position.x - from.x, end.position.y - from.y, end.position.z - from.z) * 1000
+    ).toBeLessThan(0.5);
+  });
+
+  it('refuses to jog an arm whose position is not trusted', async () => {
+    const { port } = await connectStore();
+    startClear();
+
+    port.push('STATUS IDLE 23 0 0 30 1\n');
+    await flush();
+
+    const before = commandsOfType(port, 'J ').length;
+    await useRobotStore.getState().jogCartesian('z', 20);
+    await settle(50);
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(before);
   });
 });
