@@ -6,7 +6,14 @@ import { Vector3, Rotation3, IKResult } from '../kinematics/types';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
 import { checkSelfCollision, firstCollidingPoint } from '../kinematics/CollisionChecker';
-import { matrixToRpy, multiply3, rotationAboutAxis, rpyToMatrix } from '../kinematics/linalg';
+import {
+  getRotation,
+  getTranslation,
+  matrixToRpy,
+  multiply3,
+  rotationAboutAxis,
+  rpyToMatrix
+} from '../kinematics/linalg';
 import {
   Waypoint,
   Trajectory,
@@ -25,11 +32,13 @@ import {
   NUM_JOINTS,
   ToolFrame,
   clampToLimitsDeg,
+  degToRad,
   getToolFrame,
   resetToolFrame as resetModelToolFrame,
   setToolFrame as setModelToolFrame
 } from '../kinematics/robotModel';
 import { loadToolFrame, saveToolFrame } from './toolFrameStorage';
+import { ToolCalibration, ToolTouch, solveToolOffset } from '../kinematics/toolCalibration';
 import { loadWorkObjects, saveWorkObjects } from './workObjectStorage';
 import {
   BASE_FRAME,
@@ -268,6 +277,26 @@ interface RobotStore {
   setToolFrame: (frame: Partial<ToolFrame>) => void;
   /** Back to the bare flange. */
   resetToolFrame: () => void;
+
+  /**
+   * Touches of one fixed point, for working out where the tool tip is.
+   *
+   * Flange poses - frame 6, before any tool is applied - so re-calibrating
+   * cannot compound onto the previous answer. Recording the TCP instead would
+   * make every calibration relative to the last one.
+   */
+  toolTouches: ToolTouch[];
+  /** True while the four-touch procedure is running. */
+  calibratingTool: boolean;
+  beginToolCalibration: () => void;
+  /** Record where the flange is now as another touch of the same point. */
+  touchToolPoint: () => void;
+  undoToolTouch: () => void;
+  cancelToolCalibration: () => void;
+  /** Solve for the offset and apply it. Returns what it found, or the reason not. */
+  finishToolCalibration: () => ToolCalibration;
+  /** The last calibration's result, kept so the panel can show its residual. */
+  toolCalibration: ToolCalibration | null;
   /** Drop everything that was measured against the previous tool frame. */
   afterToolFrameChange: () => void;
   updateCurrentPosition: () => void;
@@ -522,6 +551,9 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   activeWorkObject: null,
   ioState: null,
   ioNames: { outputs: [], inputs: [] },
+  toolTouches: [],
+  calibratingTool: false,
+  toolCalibration: null,
   jogFrame: 'base',
   jogStepMm: 5,
   jogStepDeg: 5,
@@ -1004,6 +1036,76 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const { serialManager } = get();
     if (!serialManager) return;
     await get().sendRawCommand('O');
+  },
+
+  beginToolCalibration: () => {
+    set({ calibratingTool: true, toolTouches: [], toolCalibration: null });
+    get().logEvent(
+      'info',
+      'Tool calibration: touch one fixed point four times, turning the wrist ' +
+        'well between touches'
+    );
+  },
+
+  touchToolPoint: () => {
+    const { calibratingTool, toolTouches, currentAngles, firmwareStatus } = get();
+    if (!calibratingTool) return;
+
+    if (firmwareStatus && !firmwareStatus.positionTrusted) {
+      get().logEvent(
+        'error',
+        'Not recording that touch: the reported position is not trusted until ' +
+          'the arm has been homed.'
+      );
+      return;
+    }
+
+    // Frame 6, not the TCP. The whole point is to find what sits between them,
+    // so reading the TCP would fold the answer being looked for into the
+    // measurement of it.
+    const fk = ForwardKinematics.solveRad(
+      degToRad([
+        currentAngles.J1, currentAngles.J2, currentAngles.J3,
+        currentAngles.J4, currentAngles.J5, currentAngles.J6
+      ])
+    );
+    const flange = fk.frames[NUM_JOINTS - 1];
+
+    set({
+      toolTouches: [
+        ...toolTouches,
+        { position: getTranslation(flange), rotation: getRotation(flange) }
+      ]
+    });
+    get().logEvent('ok', `Touch ${toolTouches.length + 1} of 4 recorded`);
+  },
+
+  undoToolTouch: () => set(state => ({ toolTouches: state.toolTouches.slice(0, -1) })),
+
+  cancelToolCalibration: () =>
+    set({ calibratingTool: false, toolTouches: [], toolCalibration: null }),
+
+  finishToolCalibration: () => {
+    const result = solveToolOffset(get().toolTouches);
+    set({ toolCalibration: result });
+
+    if (!result.ok) {
+      get().logEvent('error', `Tool calibration: ${result.reason}`);
+      // Touches are kept, so a rejected set can be added to rather than redone.
+      return result;
+    }
+
+    // Only the offset. The rotation is a different measurement and needs a
+    // gauge; leaving it alone means a calibration cannot silently undo one.
+    get().setToolFrame({ xyz: result.offset });
+    set({ calibratingTool: false, toolTouches: [] });
+
+    get().logEvent(
+      'ok',
+      `Tool tip is ${(Math.hypot(result.offset.x, result.offset.y, result.offset.z) * 1000).toFixed(1)} mm ` +
+        `from the flange, touches agreeing to ${result.residualMm.toFixed(2)} mm`
+    );
+    return result;
   },
 
   setToolFrame: (frame) => {

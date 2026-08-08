@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { DEFAULT_TOOL_FRAME } from '../kinematics/robotModel';
+import { CartesianJogPanel } from './CartesianJogPanel';
 
 const RAD = Math.PI / 180;
 
@@ -24,7 +25,20 @@ const RAD = Math.PI / 180;
  * keystroke was overwritten before the next one landed.
  */
 export const ToolFramePanel: React.FC = () => {
-  const { toolFrame, setToolFrame, resetToolFrame, currentPosition } = useRobotStore();
+  const {
+    toolFrame,
+    setToolFrame,
+    resetToolFrame,
+    currentPosition,
+    calibratingTool,
+    toolTouches,
+    toolCalibration,
+    beginToolCalibration,
+    touchToolPoint,
+    undoToolTouch,
+    cancelToolCalibration,
+    finishToolCalibration
+  } = useRobotStore();
 
   // Millimetres and degrees in the UI, metres and radians in the model. The
   // model is in SI because the kinematics are; nobody measures a tool in metres.
@@ -118,6 +132,91 @@ export const ToolFramePanel: React.FC = () => {
         reported position is the flange origin, and <em>hold the tool level</em>{' '}
         means <em>hold the flange level</em>.
       </p>
+
+      {/* Finding the offset by touching, rather than by measuring.
+          Typing it in needs somebody who knows which way frame 6's X, Y and Z
+          point, and that is not visible on the machine - it falls out of a chain
+          of URDF rotations. Touching one point from four directions asks nothing
+          of the operator but the touching. */}
+      <div className="mb-3 p-3 border rounded bg-blue-50">
+        <h3 className="text-sm font-semibold mb-1">Find the tip by touching</h3>
+
+        {!calibratingTool ? (
+          <>
+            <p className="text-xs text-gray-700 mb-2">
+              Put something pointed on the bench — a nail, a sharpened screw.
+              Touch its tip with the tool&apos;s tip four times, approaching from
+              genuinely different directions each time. The point never moves, so
+              the only unknown left is where your tip sits relative to the flange.
+            </p>
+            <button
+              onClick={beginToolCalibration}
+              className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+            >
+              Start
+            </button>
+          </>
+        ) : (
+          <>
+            <p className="text-xs text-gray-700 mb-2">
+              Move the tool tip onto the <strong>same</strong> point as last time,
+              from a different angle, then touch.
+            </p>
+
+            <ol className="text-xs mb-2 space-y-0.5">
+              {[0, 1, 2, 3].map(i => (
+                <li key={i} className={toolTouches[i] ? 'text-gray-700' : 'text-gray-400'}>
+                  {i + 1}. {toolTouches[i] ? 'recorded' : 'not yet'}
+                </li>
+              ))}
+            </ol>
+
+            <div className="flex gap-2 mb-1">
+              <button
+                onClick={touchToolPoint}
+                className="flex-1 px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+              >
+                Touch {Math.min(toolTouches.length + 1, 4)}
+              </button>
+              <button
+                onClick={finishToolCalibration}
+                disabled={toolTouches.length < 4}
+                className="px-3 py-1 bg-green-700 text-white rounded text-sm hover:bg-green-800 disabled:bg-gray-300"
+              >
+                Set tool
+              </button>
+              <button
+                onClick={cancelToolCalibration}
+                className="px-3 py-1 border rounded text-sm hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+            </div>
+
+            {toolTouches.length > 0 && (
+              <button onClick={undoToolTouch} className="text-xs text-gray-600 underline">
+                Undo last touch
+              </button>
+            )}
+
+            <div className="mt-3 -mx-3 -mb-3 border-t bg-white rounded-b">
+              <CartesianJogPanel />
+            </div>
+          </>
+        )}
+
+        {toolCalibration && !toolCalibration.ok && (
+          <p className="mt-2 text-xs text-red-700">{toolCalibration.reason}</p>
+        )}
+        {toolCalibration && toolCalibration.ok && (
+          <p className="mt-2 text-xs text-green-800">
+            Touches agree to <strong>{toolCalibration.residualMm.toFixed(2)} mm</strong>,
+            taken {toolCalibration.spreadDeg.toFixed(0)}° apart. That figure is your
+            aim, the arm&apos;s repeatability and the model&apos;s fidelity added
+            together — the first real number for how good this arm is.
+          </p>
+        )}
+      </div>
 
       <div className="mb-3">
         <h3 className="text-sm font-semibold mb-2 text-gray-700">

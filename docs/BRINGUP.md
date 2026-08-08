@@ -206,10 +206,22 @@ Use the **Tool frame** panel at the top of the Cartesian tab. Millimetres and
 degrees; it remembers what you enter and prints the literal to paste into
 `robotModel.ts`.
 
-- [ ] **Offset.** Measure from the flange face to the tool tip along frame 6's
-      three axes. Check it: spin J6 through 180°. The tip should sweep a circle
-      of twice the radial offset, and the reported position should follow it. On
-      a bare flange the reported position does not move at all, which is the
+- [ ] **Offset — by touching, not by measuring.** Press *Start* under "Find the
+      tip by touching". Put something pointed on the bench — a nail, a sharpened
+      screw — and touch its tip with the tool's tip four times, approaching from
+      genuinely different directions. Press *Set tool*.
+
+      Typing the offset in instead needs somebody who knows which way frame 6's
+      X, Y and Z point, and that is not visible on the machine: it falls out of a
+      chain of URDF rotations. Touching asks nothing but the touching.
+
+      Read the residual it reports. That figure is your aim, the arm's
+      repeatability and the model's fidelity added together — the first real
+      number for how good this arm is.
+
+      Check it afterwards: spin J6 through 180°. The tip should sweep a circle of
+      twice the radial offset, and the reported position should follow it. On a
+      bare flange the reported position does not move at all, which is the
       quickest way to tell the offset is still zero.
 - [ ] **Rotation.** Level the base first, or this measures the table. Command the
       tool to a known attitude, put a digital inclinometer on it, and enter the

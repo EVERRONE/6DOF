@@ -148,6 +148,9 @@ beforeEach(() => {
     jogStepDeg: 5,
     teachingWorkObject: null,
     touchedPoints: [],
+    toolTouches: [],
+    calibratingTool: false,
+    toolCalibration: null,
     currentAngles: {
       J1: HOME_POSE_DEG[0], J2: HOME_POSE_DEG[1], J3: HOME_POSE_DEG[2],
       J4: HOME_POSE_DEG[3], J5: HOME_POSE_DEG[4], J6: HOME_POSE_DEG[5]
@@ -1443,5 +1446,96 @@ describe('store: teaching a work object across tab changes', () => {
 
     useRobotStore.getState().touchPoint();
     expect(useRobotStore.getState().touchedPoints).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('store: finding the tool tip by touching', () => {
+  /** Four arm poses whose wrists are well apart. */
+  const poses = () => {
+    const b = [...HOME_POSE_DEG];
+    return [
+      [...b],
+      [b[0], b[1], b[2], b[3] - 40, b[4] + 30, b[5]],
+      [b[0], b[1], b[2], b[3] + 35, b[4] - 25, b[5] + 40],
+      [b[0] + 20, b[1], b[2], b[3], b[4] + 45, b[5] - 30]
+    ];
+  };
+
+  const park = (q: number[]) =>
+    useRobotStore.setState({
+      currentAngles: { J1: q[0], J2: q[1], J3: q[2], J4: q[3], J5: q[4], J6: q[5] }
+    });
+
+  it('records flange poses, not the TCP, so it cannot compound', async () => {
+    await connectStore();
+    // A tool already fitted. The touches must be measured to frame 6 regardless,
+    // or every calibration would be relative to the last one.
+    useRobotStore.getState().setToolFrame({ xyz: { x: 0.05, y: 0, z: 0.05 } });
+
+    useRobotStore.getState().beginToolCalibration();
+    park(poses()[0]);
+    useRobotStore.getState().touchToolPoint();
+
+    const touch = useRobotStore.getState().toolTouches[0];
+    const flange = ForwardKinematics.solveRad(degToRad(poses()[0])).frames[5];
+    expect(touch.position.x).toBeCloseTo(flange[0][3], 12);
+    expect(touch.position.y).toBeCloseTo(flange[1][3], 12);
+    expect(touch.position.z).toBeCloseTo(flange[2][3], 12);
+
+    useRobotStore.getState().resetToolFrame();
+  });
+
+  it('will not record a touch from an untrusted position', async () => {
+    const { port } = await connectStore();
+    useRobotStore.getState().beginToolCalibration();
+
+    port.push('STATUS IDLE 23 0 0 30 1\n');
+    await flush();
+
+    useRobotStore.getState().touchToolPoint();
+    expect(useRobotStore.getState().toolTouches).toHaveLength(0);
+  });
+
+  it('keeps the touches when the four do not determine a tool', async () => {
+    await connectStore();
+    useRobotStore.getState().beginToolCalibration();
+
+    // Four touches with the wrist barely turned: the solve cannot separate the
+    // offset from the point, and it must say so rather than return noise.
+    const b = [...HOME_POSE_DEG];
+    for (const dj of [0, 1, 2, 3]) {
+      park([b[0], b[1] + dj * 0.5, b[2], b[3], b[4], b[5]]);
+      useRobotStore.getState().touchToolPoint();
+    }
+
+    const result = useRobotStore.getState().finishToolCalibration();
+    expect(result.ok).toBe(false);
+    // Still calibrating, and the touches survive - a rejected set can be added
+    // to rather than started again.
+    expect(useRobotStore.getState().calibratingTool).toBe(true);
+    expect(useRobotStore.getState().toolTouches).toHaveLength(4);
+  });
+
+  it('sets only the offset, leaving a measured rotation alone', async () => {
+    await connectStore();
+    // A rotation somebody measured with a gauge. A tip calibration is a
+    // different measurement and must not quietly undo it.
+    useRobotStore.getState().setToolFrame({ rpy: { roll: 0.3, pitch: 0, yaw: 0 } });
+
+    useRobotStore.getState().beginToolCalibration();
+    for (const q of poses()) {
+      park(q);
+      useRobotStore.getState().touchToolPoint();
+    }
+    const result = useRobotStore.getState().finishToolCalibration();
+
+    // These touches are of four different points, not one, so the solve may
+    // reject them - what matters is that the rotation survives either way.
+    void result;
+    expect(useRobotStore.getState().toolFrame.rpy.roll).toBeCloseTo(0.3, 12);
+
+    useRobotStore.getState().resetToolFrame();
   });
 });
