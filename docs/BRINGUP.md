@@ -287,6 +287,31 @@ between a fitted tool and the arm driving it into its own shoulder.
 > construction. Shoulder, upper arm and elbow are checked and carry the real
 > information.
 
+### Freedom to move — the readout under the jog buttons
+
+Not a calibration, but read it while doing the ones above, because it explains
+half the refusals.
+
+The **Freedom to move** figure on the jog panel is how much tool motion the arm
+can produce in its worst direction per radian of joint motion. It reads **0.0000
+at the parked pose** — the arm parks in its own wrist singularity, J5 at 131° is
+URDF zero, and J4 and J6 turn the tool about the same axis there. Anywhere clear
+of it reads 0.02 upwards, and the best this arm reaches anywhere is 0.097.
+
+- [ ] Home the arm and look at the figure. It should read 0.0000 with "J4 and J6
+      are lined up" next to it.
+- [ ] Press **Get clear**. The panel says what it will cost first — on this arm
+      J5 moves about 11.5°, the tool tips about 9.7°, and the tip stays put to
+      within 0.11 mm. Afterwards the figure should read about 0.022.
+
+There is no free escape and the panel does not pretend otherwise. Every
+configuration reaching the parked pose has J4 and J6 lined up, so the tool has to
+move; what is kept is the tip.
+
+> Refusals like *"J4 jumps 13° between two samples 2 mm apart"* are this number
+> being too small, reported after the fact. Straightening and squaring both work
+> better away from it.
+
 ### Repeatability — MEASURED, under a millimetre
 
 The one measurement that isolates the mechanics, and the only way to find out

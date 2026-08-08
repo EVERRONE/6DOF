@@ -16,6 +16,7 @@ import {
   transpose3
 } from '../kinematics/linalg';
 import { AxisAlignment, nearestAxisAligned } from '../kinematics/axisAlign';
+import { Escape, Manipulability, manipulability, planEscape } from '../kinematics/singularity';
 import {
   Waypoint,
   Trajectory,
@@ -267,6 +268,26 @@ interface RobotStore {
    * pose is met, wherever that is.
    */
   alignToAxes: () => Promise<void>;
+
+  /**
+   * How freely the arm can move the tool from where it is, and which way it
+   * cannot. Null before anything has been reported.
+   *
+   * Read on every render, like the alignment. Nothing measured this before: the
+   * refusals name the joint that jumped after the fact, and this is the cause,
+   * as a number that exists before anything is refused.
+   */
+  wristFreedom: () => Manipulability | null;
+  /**
+   * The cheapest pose that gets clear of a singularity, holding the tip, or
+   * null when the arm is already clear.
+   *
+   * Separate from taking it, because the cost has to be shown first: there is
+   * no free escape, the tool has to tip, and how far is the operator's call.
+   */
+  planSingularityEscape: () => Escape | null;
+  /** Move to it. */
+  escapeSingularity: () => Promise<void>;
   /**
    * Whether the arm may be commanded to move at all, logging why not.
    *
@@ -1100,6 +1121,60 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     }
   },
 
+  wristFreedom: () => {
+    const { firmwareStatus, currentAngles } = get();
+    // The reported angles, not the target: this describes where the arm is, and
+    // a target it has not reached yet would make the readout lead the machine.
+    if (!firmwareStatus) return null;
+    return manipulability([
+      currentAngles.J1, currentAngles.J2, currentAngles.J3,
+      currentAngles.J4, currentAngles.J5, currentAngles.J6
+    ]);
+  },
+
+  planSingularityEscape: () => {
+    const { currentAngles } = get();
+    return planEscape(
+      [
+        currentAngles.J1, currentAngles.J2, currentAngles.J3,
+        currentAngles.J4, currentAngles.J5, currentAngles.J6
+      ],
+      ikSolver
+    );
+  },
+
+  escapeSingularity: async () => {
+    if (!get().canCommandMotion('the move')) return;
+
+    const escape = get().planSingularityEscape();
+    if (!escape) {
+      get().logEvent('info', 'Already clear of the singularity — nothing to do');
+      return;
+    }
+
+    const hit = checkSelfCollision(escape.jointAngles);
+    if (hit.colliding) {
+      get().logEvent(
+        'error',
+        `The way out of this singularity would put the ${hit.message}. ` +
+          'Move the arm somewhere else first.'
+      );
+      return;
+    }
+
+    get().logEvent(
+      'sent',
+      `Clearing the singularity: ${escape.joint} moves ${escape.movedDeg.toFixed(1)}°, ` +
+        `the tool tips ${escape.tiltDeg.toFixed(1)}° and the tip stays within ` +
+        `${escape.driftMm.toFixed(2)} mm`
+    );
+
+    const { serialManager, manualSpeed } = get();
+    if (!serialManager) return;
+    const ack = await serialManager.moveToAngles(toJointAngles(escape.jointAngles), manualSpeed);
+    if (!ack.accepted) get().logEvent('error', 'Move refused: firmware queue full');
+  },
+
   jogJoint: async (joint, deltaDegrees) => {
     const { serialManager, targetAngles, manualSpeed } = get();
     if (!serialManager) return;
@@ -1564,12 +1639,26 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     // reaching here means that did not help either.
     const jump = segment.discontinuity;
     if (jump) {
+      // The cause rather than only the symptom. The jump is what was observed;
+      // the measure says how little room the arm had, and the escape says what
+      // getting out of it costs - both of which used to be left to the operator
+      // to work out from "move J5 away from 131 degrees".
+      const freedom = manipulability(startAngles);
+      const escape = freedom.nearSingular ? planEscape(startAngles, ikSolver) : null;
+
       get().logEvent(
         'error',
         `Refusing the move: J${jump.axis + 1} jumps ${jump.degrees.toFixed(0)}° ` +
           `between two samples 2 mm apart, ${jump.atPercent}% along, and solving ` +
-          'the line from the far end does not avoid it. Move J5 away from 131° ' +
-          'first, or use a joint path.'
+          'the line from the far end does not avoid it. ' +
+          (freedom.nearSingular
+            ? `${freedom.joints} are lined up here — freedom to move is ` +
+              `${freedom.worst.toFixed(4)}. ` +
+              (escape
+                ? `"Get clear" on the jog panel moves ${escape.joint} ${escape.movedDeg.toFixed(1)}° ` +
+                  `and tips the tool ${escape.tiltDeg.toFixed(1)}°, or use a joint path.`
+                : 'Jog somewhere less cramped, or use a joint path.')
+            : 'Use a joint path for this stretch.')
       );
       return;
     }

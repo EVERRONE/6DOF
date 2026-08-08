@@ -516,3 +516,72 @@ export function solveSPD(A: number[][], b: number[]): number[] | null {
 
   return x;
 }
+
+/**
+ * Eigenvalues and eigenvectors of a small symmetric matrix, by cyclic Jacobi.
+ *
+ * Returns values ascending, with `vectors[i]` the unit eigenvector for
+ * `values[i]` - so `vectors[0]` is the direction the matrix flattens hardest.
+ *
+ * Jacobi rather than anything cleverer because the matrices here are 6x6 and
+ * come from a Jacobian, where the interesting case is the one that is nearly
+ * singular: Jacobi is unconditionally stable there and gets small eigenvalues
+ * right, which is the whole reason for computing them. Cholesky, next door,
+ * simply fails on the same input.
+ */
+export function symmetricEigen(M: number[][]): { values: number[]; vectors: number[][] } {
+  const n = M.length;
+  const A = M.map(row => [...row]);
+  // Accumulated rotations, as columns; transposed to rows on the way out.
+  const V: number[][] = Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))
+  );
+
+  for (let sweep = 0; sweep < 100; sweep++) {
+    let off = 0;
+    for (let p = 0; p < n; p++) {
+      for (let q = p + 1; q < n; q++) off += A[p][q] * A[p][q];
+    }
+    if (off < 1e-30) break;
+
+    for (let p = 0; p < n; p++) {
+      for (let q = p + 1; q < n; q++) {
+        if (Math.abs(A[p][q]) < 1e-300) continue;
+
+        // The rotation that zeroes A[p][q]. Written through t = tan(theta) so
+        // that a tiny off-diagonal gives a tiny angle rather than a subtraction
+        // of two near-equal numbers.
+        const theta = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+        const t =
+          Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1);
+        const s = t * c;
+
+        for (let k = 0; k < n; k++) {
+          const akp = A[k][p];
+          const akq = A[k][q];
+          A[k][p] = c * akp - s * akq;
+          A[k][q] = s * akp + c * akq;
+        }
+        for (let k = 0; k < n; k++) {
+          const apk = A[p][k];
+          const aqk = A[q][k];
+          A[p][k] = c * apk - s * aqk;
+          A[q][k] = s * apk + c * aqk;
+        }
+        for (let k = 0; k < n; k++) {
+          const vkp = V[k][p];
+          const vkq = V[k][q];
+          V[k][p] = c * vkp - s * vkq;
+          V[k][q] = s * vkp + c * vkq;
+        }
+      }
+    }
+  }
+
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => A[a][a] - A[b][b]);
+  return {
+    values: order.map(i => A[i][i]),
+    vectors: order.map(i => V.map(row => row[i]))
+  };
+}

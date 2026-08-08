@@ -83,6 +83,14 @@ export interface IKOptions {
 // !! The path does. Walked backwards from the far end, which is well
 // !! conditioned, the reconfiguration never has to happen mid-line: 44.1 becomes
 // !! 0.7. See PathInterpolator.interpolatePiece.
+// !!
+// !! What IS now handled, in singularity.ts rather than here, is knowing about
+// !! it: `manipulability()` measures how much room the arm has left (0 at the
+// !! parked pose, 0.097 at its best) and `planEscape()` finds the cheapest way
+// !! out. Neither belongs in this file. Both are properties of a pose, not of a
+// !! solve, and the solver would have to compute an eigendecomposition on every
+// !! iteration to use them - for a choice it has already been shown it cannot
+// !! make correctly one pose at a time.
 
 export const DEFAULT_IK_OPTIONS: IKOptions = {
   maxIterations: 150,

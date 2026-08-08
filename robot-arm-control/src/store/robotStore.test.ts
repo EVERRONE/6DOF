@@ -16,6 +16,7 @@ import { ExecutionState, Waypoint } from '../motion/types';
 import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG, resolveWaypoint } from '../motion/TrajectoryPlanner';
 import { rotationLog, multiply3, rpyToMatrix, transpose3 } from '../kinematics/linalg';
 import { nearestAxisAligned } from '../kinematics/axisAlign';
+import { manipulability } from '../kinematics/singularity';
 import { checkSelfCollision } from '../kinematics/CollisionChecker';
 import { loadToolShape } from './toolShapeStorage';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
@@ -2021,5 +2022,123 @@ describe('store: a path that waits', () => {
     } finally {
       stop();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('store: knowing when the wrist has lost a direction', () => {
+  /**
+   * Put the arm at a pose and make sure it has reported itself there.
+   *
+   * The status matters as much as the angles: the readout is deliberately null
+   * until the firmware has said something, so a test that only sets angles is
+   * measuring a machine that has not spoken yet.
+   */
+  const at = async (port: FakePort, angles: number[]) => {
+    useRobotStore.setState({
+      currentAngles: {
+        J1: angles[0], J2: angles[1], J3: angles[2],
+        J4: angles[3], J5: angles[4], J6: angles[5]
+      }
+    });
+    useRobotStore.getState().updateCurrentPosition();
+    port.push(STATUS_IDLE);
+    await flush();
+  };
+
+  const CLEAR = (() => {
+    const q = [...HOME_POSE_DEG];
+    q[4] = 161;
+    return q;
+  })();
+
+  it('says nothing before the arm has reported anything', async () => {
+    // A readout computed from a default pose would describe a machine that is
+    // not there.
+    await connectStore();
+    useRobotStore.setState({ firmwareStatus: null });
+    expect(useRobotStore.getState().wristFreedom()).toBeNull();
+  });
+
+  it('measures the pose the arm reports, not the one it was told to reach', async () => {
+    const { port } = await connectStore();
+    await at(port, [...HOME_POSE_DEG]);
+    // A target somewhere else entirely must not move the readout.
+    useRobotStore.setState({
+      targetAngles: { J1: 0, J2: 45, J3: 90, J4: 90, J5: 91, J6: 0 }
+    });
+
+    const freedom = useRobotStore.getState().wristFreedom();
+    expect(freedom).not.toBeNull();
+    expect(freedom!.worst).toBeLessThan(1e-6);
+    expect(freedom!.nearSingular).toBe(true);
+    expect(freedom!.joints).toBe('J4 and J6');
+  });
+
+  it('clears once the wrist is away from it', async () => {
+    const { port } = await connectStore();
+    await at(port, CLEAR);
+    expect(useRobotStore.getState().wristFreedom()!.nearSingular).toBe(false);
+  });
+
+  it('moves the arm out, and only as far as it has to', async () => {
+    const { port } = await connectStore();
+    await at(port, [...HOME_POSE_DEG]);
+
+    const planned = useRobotStore.getState().planSingularityEscape();
+    expect(planned).not.toBeNull();
+
+    await useRobotStore.getState().escapeSingularity();
+    await settle(50);
+
+    const moves = commandsOfType(port, 'J ');
+    expect(moves.length).toBeGreaterThan(0);
+
+    const sent = moves[moves.length - 1].split(/\s+/).slice(1, 7).map(Number);
+    // It went where it said it would, and that place is clear.
+    expect(sent).toEqual(planned!.jointAngles.map(v => Number(v.toFixed(3))));
+    expect(manipulability(sent).nearSingular).toBe(false);
+  });
+
+  it('says what the escape costs before it moves', async () => {
+    // There is no free escape - the tool has to tip - so the number goes in the
+    // log where it can be read afterwards, not only on a button that has gone.
+    const { port } = await connectStore();
+    await at(port, [...HOME_POSE_DEG]);
+
+    await useRobotStore.getState().escapeSingularity();
+    await settle(20);
+
+    const sent = useRobotStore.getState().events.filter(e => e.kind === 'sent').at(-1)!;
+    expect(sent.text).toMatch(/Clearing the singularity/);
+    expect(sent.text).toMatch(/tips/);
+    expect(sent.text).toMatch(/tip stays within/);
+  });
+
+  it('does nothing when the arm is already clear', async () => {
+    const { port } = await connectStore();
+    await at(port, CLEAR);
+
+    const before = commandsOfType(port, 'J ').length;
+    await useRobotStore.getState().escapeSingularity();
+    await settle(20);
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(before);
+    expect(useRobotStore.getState().events.at(-1)!.text).toMatch(/Already clear/);
+  });
+
+  it('will not escape an arm whose position is not trusted', async () => {
+    const { port } = await connectStore();
+    await at(port, [...HOME_POSE_DEG]);
+
+    port.push('STATUS IDLE 23 0 0 30 1\n');
+    await flush();
+
+    const before = commandsOfType(port, 'J ').length;
+    await useRobotStore.getState().escapeSingularity();
+    await settle(20);
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(before);
   });
 });

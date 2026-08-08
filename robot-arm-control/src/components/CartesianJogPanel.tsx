@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useRobotStore } from '../store/robotStore';
 import { ConnectionStatus } from '../types/robot';
 import { SQUARE_ENOUGH_DEG } from '../kinematics/axisAlign';
+import { NEAR_SINGULAR } from '../kinematics/singularity';
 
 /**
  * Nudging the tool in a straight line, a fixed distance at a time.
@@ -33,6 +34,9 @@ export const CartesianJogPanel: React.FC = () => {
     jogRotation,
     alignmentToAxes,
     alignToAxes,
+    wristFreedom,
+    planSingularityEscape,
+    escapeSingularity,
     connectionStatus,
     firmwareStatus,
     currentPosition,
@@ -66,6 +70,11 @@ export const CartesianJogPanel: React.FC = () => {
 
   const alignment = alignmentToAxes();
   const square = alignment !== null && alignment.errorDeg < SQUARE_ENOUGH_DEG;
+
+  const freedom = wristFreedom();
+  // Only planned when it is needed: the search runs a couple of dozen IK solves
+  // and there is nothing to plan when the arm is already clear.
+  const escape = freedom?.nearSingular ? planSingularityEscape() : null;
 
   const move = (axis: 'x' | 'y' | 'z', sign: 1 | -1) =>
     run(() => jogCartesian(axis, sign * jogStepMm));
@@ -260,6 +269,69 @@ export const CartesianJogPanel: React.FC = () => {
           </>
         )}
       </div>
+
+      {/* How freely the arm can move at all. Sits with the squareness readout
+          because both describe the wrist, and both are things that used to be
+          invisible until something was refused. */}
+      {freedom && (
+        <div className="mb-3 pt-3 border-t">
+          <label className="block text-xs text-gray-600 mb-1">Freedom to move</label>
+
+          <div className="flex items-baseline gap-2">
+            <span
+              className={`font-mono text-lg font-semibold ${
+                freedom.nearSingular ? 'text-amber-700' : 'text-gray-800'
+              }`}
+            >
+              {freedom.worst.toFixed(4)}
+            </span>
+            <span className="text-xs text-gray-500">
+              {freedom.nearSingular
+                ? `— ${freedom.joints} are lined up`
+                : 'clear of any singularity'}
+            </span>
+          </div>
+
+          {freedom.nearSingular ? (
+            <>
+              <p className="mt-1 mb-2 text-xs text-gray-600">
+                Below {NEAR_SINGULAR} the arm has lost a direction: {freedom.joints}{' '}
+                turn the tool about the same axis here, so a small Cartesian move
+                costs a large wrist swing. This is what a refusal like "J4 jumps
+                13° between two samples 2 mm apart" is really reporting.
+              </p>
+
+              {escape ? (
+                <>
+                  <button
+                    onClick={() => run(escapeSingularity)}
+                    disabled={blocked !== null || busy}
+                    className="w-full px-3 py-2 rounded font-semibold text-white bg-amber-600 hover:bg-amber-700 disabled:bg-gray-300 mb-1"
+                  >
+                    Get clear
+                  </button>
+                  {/* Shown before it moves, because there is no free escape and
+                      how much attitude to spend is the operator's call. */}
+                  <p className="text-xs text-gray-500">
+                    {escape.joint} moves {escape.movedDeg.toFixed(1)}°, the tool tips{' '}
+                    {escape.tiltDeg.toFixed(1)}°, and the tip stays put to within{' '}
+                    {escape.driftMm.toFixed(2)} mm.
+                  </p>
+                </>
+              ) : (
+                <p className="text-xs text-amber-700">
+                  No way out within 40° of any joint from here — jog the arm
+                  somewhere less cramped first.
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="mt-1 text-xs text-gray-500">
+              Bigger is better. The best this arm reaches anywhere is about 0.097.
+            </p>
+          )}
+        </div>
+      )}
 
       <p className="text-xs text-gray-500">
         X and Y are not labelled left and right on purpose — which is which

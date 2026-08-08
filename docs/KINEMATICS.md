@@ -567,6 +567,57 @@ interpolator treats it, because a path where *every* step is large is merely a
 fast path. `executeTrajectory` refuses on `Trajectory.discontinuity`, which
 aggregates the first jump across all segments.
 
+### Measuring it: how much room is left
+
+`singularity.ts`. Everything above is about *reacting* to a singularity — the
+refusal names the joint that jumped, after the fact. This is the cause, as one
+number that exists before anything is refused.
+
+`manipulability(q)` takes the smallest singular value of the Jacobian, with the
+rotation rows scaled by the arm's reach (0.37 m) so metres and radians are
+comparable. Singular values rather than the determinant: the determinant is the
+product of all six, so it is small both when one direction is lost and when the
+arm is merely slow everywhere, and it cannot say which. Computed as an
+eigendecomposition of `JᵀJ` by cyclic Jacobi (`symmetricEigen` in `linalg.ts`) —
+Jacobi rather than Cholesky because the interesting input is the one that is
+nearly singular, where Cholesky simply fails.
+
+Measured on this arm:
+
+| J5 | 131 (parked) | 133 | 136 | 141 | 151 | 161 | 91 | best anywhere |
+|---|---|---|---|---|---|---|---|---|
+| worst | **0.0000** | 0.0038 | 0.0095 | 0.0190 | 0.0375 | 0.0554 | 0.0722 | 0.097 |
+
+Read it as: joint motion needed ≈ tool motion ÷ this. At 0.02 a 2 mm Cartesian
+step costs about 6° of wrist; at 0.005, about 23°. `NEAR_SINGULAR = 0.02` sits
+where that starts being felt — earlier than the path planner refuses anything,
+deliberately, since the point is to say so first. 11.8% of poses drawn uniformly
+from the joint limits fall below it.
+
+The eigenvector for the smallest value is the joint direction that produces no
+tool motion. At the parked pose it comes out as **J4 and J6 exactly opposed**,
+which is the singularity stated in joint terms rather than asserted.
+
+### Getting out of one
+
+`planEscape(q, solver)`. There is no free escape, and the reason is worth being
+plain about: a singularity is a property of the pose, not of a choice made
+getting there. Every configuration that reaches the parked pose has J4 and J6
+lined up, so re-solving the same pose cannot help. **The tool has to move.**
+
+What can be kept is the tip. The escape holds position and pays entirely in
+attitude, and reports the bill before anything moves. Every joint is tried and
+the cheapest wins; on this arm that is reliably J5 — the joint the refusals have
+been telling the operator to move by hand.
+
+From the parked pose: **J5 moves 11.5°, the tool tips 9.7°, the tip drifts
+0.11 mm**, and the measure goes 0 → 0.0218.
+
+> Kept out of `InverseKinematics` on purpose. Both are properties of a pose
+> rather than of a solve, and the solver would have to run an eigendecomposition
+> every iteration to use them — for a choice four measured attempts showed it
+> cannot make correctly one pose at a time.
+
 ---
 
 ## Validation
