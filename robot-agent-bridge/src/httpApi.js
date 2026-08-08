@@ -1,5 +1,10 @@
 import { timingSafeEqual } from 'node:crypto';
-import { normalizeCommandParams, ValidationError, PRIVILEGED_COMMANDS } from './protocol.js';
+import {
+  normalizeCommandParams,
+  ValidationError,
+  PRIVILEGED_COMMANDS,
+  COMMANDS_REQUIRING_ARM
+} from './protocol.js';
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -40,10 +45,7 @@ const readBody = (req) =>
   });
 
 export function createHttpApi({ config, state, executorLink, log }) {
-  // Phase 1+2 ships nothing that can move the arm, so nothing requires arming
-  // yet. The hook exists so that adding move_relative in phase 3 is a one-line
-  // change here rather than a new code path.
-  const commandNeedsArm = (type) => ['move_relative', 'move_to', 'move_joints', 'home'].includes(type);
+  const commandNeedsArm = (type) => COMMANDS_REQUIRING_ARM.includes(type);
 
   const runCommand = async (type, rawParams) => {
     let params;
@@ -72,7 +74,25 @@ export function createHttpApi({ config, state, executorLink, log }) {
       return { status: 409, payload };
     }
 
-    const outcome = await executorLink.send(type, params);
+    // One move at a time. moveToPosition cancels the previous *planner*, but a
+    // queue already running on the Teensy keeps running — so a second motion
+    // command must be refused here rather than quietly racing the first.
+    if (commandNeedsArm(type) && state.getTelemetry()?.state?.busy) {
+      state.recordAudit({ type, params, outcome: 'refused', reason: 'busy' });
+      return {
+        status: 409,
+        payload: {
+          ok: false,
+          error: {
+            code: 'BUSY',
+            message: 'The arm is already executing a move. Wait for it to finish, or call stop first.'
+          }
+        }
+      };
+    }
+
+    const timeoutMs = commandNeedsArm(type) ? config.motionTimeoutMs : config.commandTimeoutMs;
+    const outcome = await executorLink.send(type, params, timeoutMs);
 
     state.recordAudit({
       type,
@@ -156,7 +176,9 @@ export function createHttpApi({ config, state, executorLink, log }) {
     const routes = {
       'GET /api/status': 'get_status',
       'POST /api/preview_move': 'preview_move',
-      'POST /api/stop': 'stop'
+      'POST /api/stop': 'stop',
+      'POST /api/move_relative': 'move_relative',
+      'POST /api/move_to': 'move_to'
     };
 
     const route = routes[`${req.method} ${url.pathname}`];
@@ -165,7 +187,7 @@ export function createHttpApi({ config, state, executorLink, log }) {
         ok: false,
         error: {
           code: 'NOT_FOUND',
-          message: `No such endpoint: ${req.method} ${url.pathname}. Available: GET /api/status, POST /api/preview_move, POST /api/stop, GET /api/telemetry, GET /api/audit.`
+          message: `No such endpoint: ${req.method} ${url.pathname}. Available: GET /api/status, POST /api/preview_move, POST /api/move_relative, POST /api/move_to, POST /api/stop, GET /api/telemetry, GET /api/audit.`
         }
       });
       return;

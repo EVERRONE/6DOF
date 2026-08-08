@@ -404,9 +404,17 @@ window, and the three commands that cannot move the arm:
   target without touching the store
 - `stop` — privileged, bypasses arming and the busy guard
 
-**Phase 3 — motion.** `move_relative` / `move_to` through `moveToPosition`,
-with distance caps, the busy guard, the resolved-vector echo, and the settle
-state machine from §4.1. Gated behind phase 1+2 being tested on real hardware.
+**Phase 3 — implemented, not yet run on hardware.** `move_relative` and
+`move_to` through `moveToPosition`, with the settle state machine from §4.1,
+arming enforced in the executor, a busy guard in both layers, a 150 mm
+displacement ceiling in both layers, and the resolved vector echoed on every
+response. `keep_orientation` defaults to true and passes the current tool
+rotation explicitly, which forces `pose_lock` regardless of the app's Cartesian
+mode.
+
+Everything that can be checked without hardware is covered by tests: frame
+resolution, parameter handling, clamping, and every refusal path. What remains
+untested is the browser-to-broker link and the arm itself.
 
 **Phase 4 — MCP adapter** over the HTTP API, so Hermes attaches by config
 alone (§4).

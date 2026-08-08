@@ -1,10 +1,13 @@
 import { useRobotStore } from '../store/robotStore';
-import { ConnectionStatus } from '../types/robot';
+import { ConnectionStatus, RobotState } from '../types/robot';
 import {
   classifyReachability,
   getDefaultReachabilityAtlas,
   isReachabilityAtlasReady
 } from '../kinematics/reachabilityAtlas';
+import { ForwardKinematics } from '../kinematics/ForwardKinematics';
+import { getEffectiveUrdfOffsets, logicalToUrdfAngles } from '../kinematics/angleMapping';
+import { Rotation3, Vector3 } from '../kinematics/types';
 import { applyDirectionalOffset } from './frames';
 import {
   BRIDGE_PROTOCOL_VERSION,
@@ -12,6 +15,7 @@ import {
   BridgeError,
   BridgeLinkState,
   BridgeTelemetry,
+  MoveToParams,
   PreviewMoveParams
 } from './bridgeProtocol';
 
@@ -29,6 +33,30 @@ import {
 
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
 const TELEMETRY_INTERVAL_MS = 1000;
+
+/**
+ * Executor-side displacement ceiling, in millimetres.
+ *
+ * The broker clamps too, but this is the copy that matters: it is the one
+ * closest to the hardware and the one that still applies if anything ever
+ * speaks to the executor directly.
+ */
+const MAX_DISPLACEMENT_MM = 150;
+
+/**
+ * How long to wait for a move to finish before giving up on knowing.
+ *
+ * Planning alone can take 20 s, and then the arm has to travel. On timeout we
+ * report "unknown", never "done" — a move that is still running must not be
+ * reported as arrived.
+ */
+const MOVE_SETTLE_TIMEOUT_MS = 90_000;
+
+type MoveOutcome =
+  | { status: 'arrived' }
+  | { status: 'failed'; error: string; notes: string[] }
+  | { status: 'stopped' }
+  | { status: 'unknown'; reason: string };
 
 export interface AgentBridgeClientOptions {
   url: string;
@@ -230,12 +258,16 @@ export class AgentBridgeClient {
         return this.buildStatus();
       case 'preview_move':
         return this.previewMove(command.params as unknown as PreviewMoveParams);
+      case 'move_relative':
+        return this.moveRelative(command.params as unknown as PreviewMoveParams);
+      case 'move_to':
+        return this.moveToAbsolute(command.params as unknown as MoveToParams);
       case 'stop':
         return this.stopMotion();
       default:
         throw new BridgeCommandError(
           'UNKNOWN_COMMAND',
-          `This app does not implement "${command.type}". Motion commands arrive in a later phase.`
+          `This app does not implement "${command.type}".`
         );
     }
   }
@@ -333,6 +365,276 @@ export class AgentBridgeClient {
       executed: false,
       note: 'Preview only — nothing was sent to the robot.'
     };
+  }
+
+  /**
+   * Full tool pose from a single FK traversal.
+   *
+   * The store exposes `currentPosition` but not the rotation, and a pose-locked
+   * move needs both — taking them from one traversal keeps them consistent.
+   */
+  private computeCurrentPose(): { position: Vector3; rotation: Rotation3 } | null {
+    const state = useRobotStore.getState();
+    const config = state.firmwareConfig;
+    if (!config || !state.kinematicsFrameReady) return null;
+
+    const offsets = getEffectiveUrdfOffsets(config);
+    const a = state.currentAngles;
+    const fk = ForwardKinematics.solve(
+      logicalToUrdfAngles([a.J1, a.J2, a.J3, a.J4, a.J5, a.J6], offsets)
+    );
+    if (!fk.success) return null;
+
+    return {
+      position: fk.endEffectorPose.position,
+      rotation: fk.endEffectorPose.rotation
+    };
+  }
+
+  /**
+   * Watches the store for the real outcome of a move.
+   *
+   * This exists because `moveToPosition` cannot tell you either thing you need:
+   * its promise resolves when `TQ RUN` is acknowledged rather than when the arm
+   * arrives, and it never throws — every failure is reported by setting
+   * `planningState: 'failed'`. So the outcome has to be observed, not awaited.
+   *
+   * Must be started *before* `moveToPosition` is called, or the early
+   * transitions are missed.
+   */
+  private watchMoveOutcome(timeoutMs: number): Promise<MoveOutcome> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let sawMotion = false;
+      let unsubscribe: (() => void) | null = null;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      const finish = (outcome: MoveOutcome): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        unsubscribe?.();
+        resolve(outcome);
+      };
+
+      unsubscribe = useRobotStore.subscribe((state) => {
+        if (state.planningState === 'failed') {
+          finish({
+            status: 'failed',
+            error: state.ikStatus?.error ?? 'Cartesian planning failed',
+            notes: state.planningNotes.slice(0, 8)
+          });
+          return;
+        }
+
+        if (state.robotState === RobotState.ESTOPPED) {
+          finish({ status: 'stopped' });
+          return;
+        }
+
+        if (state.moveInProgress) {
+          sawMotion = true;
+          return;
+        }
+
+        // TQ_DONE clears moveInProgress and returns robotState to IDLE in one
+        // update, so this is the arrival signal.
+        if (sawMotion && state.robotState === RobotState.IDLE) {
+          finish({ status: 'arrived' });
+        }
+      });
+
+      timer = setTimeout(
+        () =>
+          finish({
+            status: 'unknown',
+            reason: `No completion signal within ${timeoutMs} ms. The arm may still be moving.`
+          }),
+        timeoutMs
+      );
+    });
+  }
+
+  /** Refuses for reasons the agent can act on, before anything is committed. */
+  private assertCanMove(): void {
+    const state = useRobotStore.getState();
+
+    if (!this.isArmed()) {
+      throw new BridgeCommandError(
+        'NOT_ARMED',
+        'AI control is not armed. Someone has to arm it in the Agent Control panel of the robot app, at the machine.'
+      );
+    }
+
+    if (state.moveInProgress || state.planningState === 'stage1_fast' || state.planningState === 'stage2_refine') {
+      throw new BridgeCommandError(
+        'BUSY',
+        'The arm is already executing a move. Wait for it to finish, or call stop first.'
+      );
+    }
+
+    if (!state.isCartesianReady()) {
+      throw new BridgeCommandError('NOT_READY', this.describeReadiness(state));
+    }
+
+    if (!state.firmwareConfig?.capabilities?.trajectoryQueue) {
+      throw new BridgeCommandError(
+        'NO_QUEUE',
+        'This firmware does not support the trajectory queue (TQ), which straight-line moves require.'
+      );
+    }
+  }
+
+  private async executeMove(
+    targetM: Vector3,
+    fromPose: { position: Vector3; rotation: Rotation3 },
+    keepOrientation: boolean,
+    wait: boolean,
+    extra: Record<string, unknown>
+  ): Promise<unknown> {
+    const store = useRobotStore.getState();
+    const startedAt = Date.now();
+
+    // Subscribe before commanding, or the first transitions are missed.
+    const watcher = wait ? this.watchMoveOutcome(MOVE_SETTLE_TIMEOUT_MS) : null;
+
+    // Passing the current rotation forces pose_lock regardless of the app's
+    // Cartesian mode: "move sideways without tilting the tool".
+    const movePromise = store.moveToPosition(
+      targetM,
+      keepOrientation ? { ...fromPose.rotation } : undefined
+    );
+
+    const base = {
+      ...extra,
+      keepOrientation,
+      cartesianMode: keepOrientation ? 'pose_lock' : useRobotStore.getState().cartesianMode,
+      fromMm: {
+        x: toMm(fromPose.position.x),
+        y: toMm(fromPose.position.y),
+        z: toMm(fromPose.position.z)
+      },
+      requestedToMm: { x: toMm(targetM.x), y: toMm(targetM.y), z: toMm(targetM.z) }
+    };
+
+    if (!wait) {
+      await movePromise;
+      const after = useRobotStore.getState();
+      if (after.planningState === 'failed') {
+        throw new BridgeCommandError(
+          'PLANNING_FAILED',
+          after.ikStatus?.error ?? 'Cartesian planning failed',
+          after.planningNotes.slice(0, 8)
+        );
+      }
+      return { ...base, outcome: 'started', note: 'Queue is running. Poll get_status for arrival.' };
+    }
+
+    const outcome = await watcher!;
+    await movePromise.catch(() => undefined);
+
+    const settledPose = this.computeCurrentPose();
+    const actualToMm = settledPose
+      ? {
+          x: toMm(settledPose.position.x),
+          y: toMm(settledPose.position.y),
+          z: toMm(settledPose.position.z)
+        }
+      : null;
+
+    const common = { ...base, actualToMm, durationMs: Date.now() - startedAt };
+
+    switch (outcome.status) {
+      case 'arrived':
+        return { ...common, outcome: 'arrived' };
+      case 'failed':
+        // The planner's messages are written for humans and say what to do
+        // next; passing them through beats inventing a code.
+        throw new BridgeCommandError('PLANNING_FAILED', outcome.error, outcome.notes);
+      case 'stopped':
+        throw new BridgeCommandError(
+          'STOPPED',
+          'The move was interrupted by an emergency stop before it finished.'
+        );
+      default:
+        throw new BridgeCommandError('UNKNOWN_OUTCOME', outcome.reason);
+    }
+  }
+
+  /** Straight-line relative move, via the queue-based Cartesian path. */
+  private async moveRelative(params: PreviewMoveParams): Promise<unknown> {
+    this.assertCanMove();
+
+    const pose = this.computeCurrentPose();
+    if (!pose) {
+      throw new BridgeCommandError(
+        'NO_POSE',
+        'The current tool position is not known yet. Wait for Cartesian frame sync.'
+      );
+    }
+
+    const distanceMm = Math.min(params.distanceMm, MAX_DISPLACEMENT_MM);
+    const { target, unitVector, deltaMm } = applyDirectionalOffset(
+      pose.position,
+      params.direction,
+      distanceMm,
+      params.frame,
+      0
+    );
+
+    return this.executeMove(target, pose, params.keepOrientation !== false, params.wait !== false, {
+      resolved: {
+        direction: params.direction,
+        frame: params.frame,
+        viewYawDeg: 0,
+        unitVector,
+        worldDeltaMm: deltaMm
+      },
+      distanceMm,
+      ...(params.clamped ? { clampedFrom: params.requestedDistanceMm } : {})
+    });
+  }
+
+  /** Straight-line move to an absolute point, in millimetres from the base. */
+  private async moveToAbsolute(params: {
+    targetMm: { x: number; y: number; z: number };
+    keepOrientation: boolean;
+    wait: boolean;
+  }): Promise<unknown> {
+    this.assertCanMove();
+
+    const pose = this.computeCurrentPose();
+    if (!pose) {
+      throw new BridgeCommandError(
+        'NO_POSE',
+        'The current tool position is not known yet. Wait for Cartesian frame sync.'
+      );
+    }
+
+    const target: Vector3 = {
+      x: params.targetMm.x / 1000,
+      y: params.targetMm.y / 1000,
+      z: params.targetMm.z / 1000
+    };
+
+    // The per-command ceiling is about displacement, so it has to be checked
+    // here — the broker cannot know how far away an absolute point is.
+    const distanceMm = Math.hypot(
+      (target.x - pose.position.x) * 1000,
+      (target.y - pose.position.y) * 1000,
+      (target.z - pose.position.z) * 1000
+    );
+
+    if (distanceMm > MAX_DISPLACEMENT_MM) {
+      throw new BridgeCommandError(
+        'TOO_FAR',
+        `That point is ${distanceMm.toFixed(0)} mm away, over the ${MAX_DISPLACEMENT_MM} mm per-command limit. Move there in steps.`
+      );
+    }
+
+    return this.executeMove(target, pose, params.keepOrientation, params.wait, {
+      distanceMm: Math.round(distanceMm * 10) / 10
+    });
   }
 
   /** Privileged: works whether or not AI control is armed. */

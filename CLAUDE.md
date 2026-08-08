@@ -522,11 +522,15 @@ Facts that matter when working on it:
   not running, the app behaves exactly as it did before. Preserve this.
 - Arming is a **time-boxed window** owned by the executor (the browser), because
   that is where the human at the machine is. The broker only mirrors it.
-- Phase 1+2 ships `get_status`, `preview_move` (dry run) and `stop`. **No
-  command in the bridge can move the arm yet.**
-- When motion is added, `moveToPosition` must be driven through a store
-  subscription, not by awaiting its promise: it resolves at `TQ RUN`, not on
-  arrival, and it never throws — failures land in `planningState: 'failed'`.
+- Commands: `get_status`, `preview_move` (dry run), `move_relative`, `move_to`,
+  `stop`. Motion requires arming; `stop` never does.
+- **Move outcomes are observed from the store, never awaited.**
+  `moveToPosition` resolves at `TQ RUN` rather than on arrival, and it never
+  throws — failures land in `planningState: 'failed'`. `watchMoveOutcome()`
+  subscribes before commanding and settles on `TQ_DONE`, `'failed'`, an
+  emergency stop, or a timeout that reports "unknown". Do not replace this with
+  an `await`.
+- Motion was verified by unit tests only; it has not yet run against hardware.
 
 Only one existing file is touched by the whole feature: `App.tsx` mounts the
 panel. Keep it that way.

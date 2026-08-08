@@ -112,7 +112,7 @@ export function createExecutorLink({ server, token, state, commandTimeoutMs, log
      * failure result, because "I do not know what happened" is information the
      * agent needs, not an exception to swallow.
      */
-    send(type, params) {
+    send(type, params, timeoutMs = commandTimeoutMs) {
       if (!socket) {
         return Promise.resolve({
           ok: false,
@@ -133,10 +133,10 @@ export function createExecutorLink({ server, token, state, commandTimeoutMs, log
             ok: false,
             error: {
               code: 'TIMEOUT',
-              message: `The robot app did not answer within ${commandTimeoutMs} ms. The command may or may not have taken effect.`
+              message: `The robot app did not answer within ${timeoutMs} ms. The command may or may not have taken effect — read /api/status before retrying.`
             }
           });
-        }, commandTimeoutMs);
+        }, timeoutMs);
 
         pending.set(id, { resolve, timer });
 

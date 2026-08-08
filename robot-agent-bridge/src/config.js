@@ -25,8 +25,15 @@ export function loadConfig(env = process.env) {
     token,
     generatedToken,
 
-    /** How long a command may wait for the executor before we give up. */
+    /** How long a read-only command may wait for the executor before we give up. */
     commandTimeoutMs: Number.parseInt(env.BRIDGE_COMMAND_TIMEOUT_MS ?? '20000', 10),
+
+    /**
+     * Motion needs far longer: planning alone can take up to 20 s, and then the
+     * arm has to actually travel. Kept above the executor's own settle timeout
+     * so the executor is the one that reports the outcome, not the broker.
+     */
+    motionTimeoutMs: Number.parseInt(env.BRIDGE_MOTION_TIMEOUT_MS ?? '120000', 10),
 
     /** Entries kept in the in-memory audit log. */
     auditLimit: Number.parseInt(env.BRIDGE_AUDIT_LIMIT ?? '200', 10)

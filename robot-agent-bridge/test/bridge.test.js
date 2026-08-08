@@ -171,3 +171,139 @@ describe('with an executor connected', () => {
     assert.ok(body.result.entries.every((e) => typeof e.at === 'string' && typeof e.type === 'string'));
   });
 });
+
+describe('motion commands', () => {
+  let ws;
+
+  const reconnect = async (handler) => {
+    ws?.close();
+    await waitFor(async () => !(await fetch(`${baseUrl}/health`).then((r) => r.json())).result.executorConnected);
+    ws = await connectExecutor(handler);
+    await waitFor(async () => (await fetch(`${baseUrl}/health`).then((r) => r.json())).result.executorConnected);
+    return ws;
+  };
+
+  const reportTelemetry = (state) => {
+    ws.send(JSON.stringify({ type: 'telemetry', state }));
+  };
+
+  const armedTelemetry = (extra = {}) => ({
+    armed: true,
+    armedUntil: Date.now() + 60_000,
+    connected: true,
+    motorsEnabled: true,
+    cartesianReady: true,
+    busy: false,
+    ...extra
+  });
+
+  after(() => ws?.close());
+
+  test('refuses a move when the executor has not reported itself armed', async () => {
+    await reconnect(() => ({ ok: true, result: { outcome: 'arrived' } }));
+    reportTelemetry({ armed: false, armedUntil: null, busy: false });
+    await waitFor(async () => !(await fetch(`${baseUrl}/health`).then((r) => r.json())).result.armed);
+
+    const res = await call('POST', '/api/move_relative', { body: { direction: 'right', distance_mm: 5 } });
+    assert.equal(res.status, 409);
+    const body = await res.json();
+    assert.equal(body.error.code, 'NOT_ARMED');
+    assert.match(body.error.message, /at the machine/);
+  });
+
+  test('refuses a move whose arming window has already expired', async () => {
+    reportTelemetry({ armed: true, armedUntil: Date.now() - 1000, busy: false });
+    await waitFor(async () => !(await fetch(`${baseUrl}/health`).then((r) => r.json())).result.armed);
+
+    const res = await call('POST', '/api/move_relative', { body: { direction: 'right' } });
+    assert.equal(res.status, 409);
+    assert.equal((await res.json()).error.code, 'NOT_ARMED');
+  });
+
+  test('accepts a move once armed, and echoes the executor result', async () => {
+    await reconnect((cmd) =>
+      cmd.type === 'move_relative'
+        ? { ok: true, result: { outcome: 'arrived', distanceMm: cmd.params.distanceMm } }
+        : { ok: true, result: {} }
+    );
+    reportTelemetry(armedTelemetry());
+    await waitFor(async () => (await fetch(`${baseUrl}/health`).then((r) => r.json())).result.armed);
+
+    const res = await call('POST', '/api/move_relative', { body: { direction: 'right', distance_mm: 5 } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.result.outcome, 'arrived');
+    assert.equal(body.result.distanceMm, 5);
+  });
+
+  test('refuses a second move while the arm is busy', async () => {
+    reportTelemetry(armedTelemetry({ busy: true }));
+    await waitFor(async () => {
+      const t = await call('GET', '/api/telemetry').then((r) => r.json());
+      return t.result.telemetry?.busy === true;
+    });
+
+    const res = await call('POST', '/api/move_relative', { body: { direction: 'right' } });
+    assert.equal(res.status, 409);
+    assert.equal((await res.json()).error.code, 'BUSY');
+  });
+
+  test('clamps an over-long move and tells the executor the clamped value', async () => {
+    let seen = null;
+    await reconnect((cmd) => {
+      seen = cmd.params;
+      return { ok: true, result: { outcome: 'arrived' } };
+    });
+    reportTelemetry(armedTelemetry());
+    await waitFor(async () => (await fetch(`${baseUrl}/health`).then((r) => r.json())).result.armed);
+
+    const res = await call('POST', '/api/move_relative', { body: { direction: 'right', distance_mm: 5000 } });
+    assert.equal(res.status, 200);
+    assert.equal(seen.distanceMm, 150);
+    assert.equal(seen.clamped, true);
+    assert.equal(seen.requestedDistanceMm, 5000);
+  });
+
+  test('defaults keep_orientation and wait to true', async () => {
+    let seen = null;
+    await reconnect((cmd) => {
+      seen = cmd.params;
+      return { ok: true, result: {} };
+    });
+    reportTelemetry(armedTelemetry());
+    await waitFor(async () => (await fetch(`${baseUrl}/health`).then((r) => r.json())).result.armed);
+
+    await call('POST', '/api/move_relative', { body: { direction: 'up' } });
+    assert.equal(seen.keepOrientation, true);
+    assert.equal(seen.wait, true);
+  });
+
+  test('rejects move_to with a missing coordinate', async () => {
+    const res = await call('POST', '/api/move_to', { body: { x_mm: 200, y_mm: 0 } });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error.code, 'INVALID_PARAMS');
+    assert.match(body.error.message, /z_mm must be a number/);
+  });
+
+  test('passes move_to coordinates through in millimetres', async () => {
+    let seen = null;
+    await reconnect((cmd) => {
+      seen = cmd.params;
+      return { ok: true, result: { outcome: 'arrived' } };
+    });
+    reportTelemetry(armedTelemetry());
+    await waitFor(async () => (await fetch(`${baseUrl}/health`).then((r) => r.json())).result.armed);
+
+    await call('POST', '/api/move_to', { body: { x_mm: 210.5, y_mm: -30, z_mm: 150 } });
+    assert.deepEqual(seen.targetMm, { x: 210.5, y: -30, z: 150 });
+  });
+
+  test('stop is never gated behind arming', async () => {
+    reportTelemetry({ armed: false, armedUntil: null, busy: true });
+    await waitFor(async () => !(await fetch(`${baseUrl}/health`).then((r) => r.json())).result.armed);
+
+    const res = await call('POST', '/api/stop');
+    assert.equal(res.status, 200);
+  });
+});

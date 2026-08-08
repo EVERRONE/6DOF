@@ -22,20 +22,27 @@ dials out, the machine holding the serial port needs no inbound port, no port
 forwarding and no stable address — while the always-on machine hosting the
 agent provides the stable endpoint.
 
-## Status: phase 1 + 2
-
-Nothing here can move the arm yet. Shipped commands:
+## Status: phase 1–3, untested on hardware
 
 | Command | HTTP | Effect |
 |---|---|---|
 | `get_status` | `GET /api/status` | Connection, motors, homed joints, TCP pose, readiness in plain words |
 | `preview_move` | `POST /api/preview_move` | **Dry run.** Resolves a direction and reports the would-be target. Sends nothing to the robot. |
+| `move_relative` | `POST /api/move_relative` | Straight-line relative move via the queue-based Cartesian path. **Requires arming.** |
+| `move_to` | `POST /api/move_to` | Straight-line move to an absolute point in mm. **Requires arming.** |
 | `stop` | `POST /api/stop` | Emergency stop. Privileged — works armed or not, and disarms afterwards. |
 
-`move_relative` / `move_to` arrive in phase 3, once this has been exercised on
-real hardware.
-
 Diagnostics: `GET /health` (no auth), `GET /api/telemetry`, `GET /api/audit`.
+
+Motion parameters: `direction` (`right`/`left`/`forward`/`backward`/`up`/`down`),
+`distance_mm` (default 50, clamped to 150), `frame` (`base` or `view`),
+`keep_orientation` (default true — holds the tool angle through the move),
+`wait` (default true — blocks until arrival rather than until the queue starts).
+
+**The motion path has not yet run against real hardware.** The frame
+resolution, the parameter handling and every refusal path are covered by tests;
+the browser-to-broker link and the arm itself are what the first session on the
+bench is for.
 
 ## Running it
 
@@ -65,10 +72,18 @@ Hermes custom tools are Python, but MCP is configuration-only, so the intended
 path is the MCP adapter (phase 4). Until then the plain HTTP API works directly:
 
 ```bash
-curl -s -H "Authorization: Bearer $BRIDGE_TOKEN" http://127.0.0.1:8765/api/status
-curl -s -H "Authorization: Bearer $BRIDGE_TOKEN" -H 'content-type: application/json' \
-     -d '{"direction":"right","distance_mm":5}' \
+AUTH=(-H "Authorization: Bearer $BRIDGE_TOKEN" -H 'content-type: application/json')
+
+curl -s "${AUTH[@]}" http://127.0.0.1:8765/api/status
+
+# Dry run first — always. This resolves the direction and shows the target
+# without sending anything to the robot.
+curl -s "${AUTH[@]}" -d '{"direction":"right","distance_mm":5}' \
      http://127.0.0.1:8765/api/preview_move
+
+# Then, once armed in the browser panel:
+curl -s "${AUTH[@]}" -d '{"direction":"right","distance_mm":5}' \
+     http://127.0.0.1:8765/api/move_relative
 ```
 
 ## Safety model
@@ -82,8 +97,18 @@ curl -s -H "Authorization: Bearer $BRIDGE_TOKEN" -H 'content-type: application/j
   none; browsers always do. That closes the "any page can reach localhost" hole.
 - **One executor at a time.** A second connection is refused rather than
   silently taking over.
-- **Distances are clamped** server-side to 150 mm per command, and the clamp is
-  reported back rather than applied silently.
+- **One move at a time.** A second motion command is refused while the arm is
+  busy. `moveToPosition` cancels the previous *planner*, but a queue already
+  running on the Teensy keeps running, so this guard cannot be skipped.
+- **Distances are clamped** to 150 mm per command — in the broker *and* again in
+  the executor, which is the copy that matters — and the clamp is reported back
+  rather than applied silently.
+- **Outcomes are observed, never assumed.** `moveToPosition` resolves at
+  `TQ RUN`, not on arrival, and never throws; the executor watches the store for
+  `TQ_DONE`, `planningState: 'failed'` or an emergency stop. On timeout the
+  answer is "unknown", never "done".
+- **Planner errors pass through verbatim.** They are already written for a human
+  and say what to do next, which beats inventing a code.
 - **Every command is audited** with its resolved vector and outcome.
 
 None of this replaces the physical power cut, which remains the real safety
