@@ -8,7 +8,7 @@ It was audited against code on 2026-03-25.
 ## Audit Status
 
 - Web tests verified: `npm test -- --watchAll=false --runInBand`
-  - Result: 21 suites passed, 63 tests passed (as of 2026-03-24)
+  - Result: 23 suites passed, 80 tests passed (as of 2026-08-08)
 - Web production build verified: `npm run build`
   - Result: succeeds with warnings
   - Current warning: missing source map in transitive dependency `@mediapipe/tasks-vision`
@@ -69,6 +69,9 @@ Read these files first when orienting or debugging:
   - React app, tests, worker, scripts
 - `docs/`
   - Protocol, kinematics, calibration, hardware audit, IK reports
+- `robot-agent-bridge/`
+  - Standalone Node broker that lets an external AI agent drive the arm
+    through the web app. Additive: nothing else depends on it.
 - `stl_meshes/`
   - Root mesh sources
 - `IMPLEMENTATION_PLAN.md`, `PHASE_*_COMPLETE.md`
@@ -502,6 +505,31 @@ Practical implication:
 
 - replaying an old saved path after changing firmware limits, calibration, or `HP` can silently change what that path means
 - a "taught" waypoint is not a fully taught tool pose unless orientation was provided explicitly
+
+## Agent Bridge (add-on)
+
+`robot-agent-bridge/` is a standalone Node broker that lets an external AI agent
+drive the arm. Design rationale: `docs/AGENT_CONTROL_API.md`.
+
+Facts that matter when working on it:
+
+- The broker runs beside the **agent**, not beside the robot. The browser dials
+  *out* over WebSocket, so the machine with the serial port needs no inbound
+  port and no stable address.
+- The browser executor (`src/agent/AgentBridgeClient.ts`) calls existing store
+  actions. It does no kinematics, no serial, no trajectory work.
+- **The bridge is opt-in and off by default.** With it disabled, or the broker
+  not running, the app behaves exactly as it did before. Preserve this.
+- Arming is a **time-boxed window** owned by the executor (the browser), because
+  that is where the human at the machine is. The broker only mirrors it.
+- Phase 1+2 ships `get_status`, `preview_move` (dry run) and `stop`. **No
+  command in the bridge can move the arm yet.**
+- When motion is added, `moveToPosition` must be driven through a store
+  subscription, not by awaiting its promise: it resolves at `TQ RUN`, not on
+  arrival, and it never throws — failures land in `planningState: 'failed'`.
+
+Only one existing file is touched by the whole feature: `App.tsx` mounts the
+panel. Keep it that way.
 
 ## Calibration And Home Pose
 

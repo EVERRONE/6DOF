@@ -3,23 +3,20 @@
 Status: **design proposal, not implemented**
 Audited against code on 2026-08-08.
 
-> **Revision note.** Section 4 (topology) was written assuming the agent runs on
-> the same machine as the browser and that the arm stays tethered by USB. Two
-> later requirements change that conclusion: the agent lives in a hosted
-> chatbox, and the arm should not need to be plugged into the user's PC.
+> **Revision note (settled).** Section 4 has been rewritten. The topology is now
+> fixed by three requirements that arrived after the first draft: the agent is
+> **Hermes Agent** (Nous Research) running on a separate Mac mini and reached
+> over Telegram/WhatsApp; the arm should not depend on the user's own laptop
+> being the only host; and — decisively — **this is an add-on that must not
+> change existing behaviour.**
 >
-> The governing principle becomes *put the network boundary above the planner,
-> not below it* — a small Linux host at the robot runs the planner over a short
-> USB link and exposes the high-level API over the network, rather than tunnelling
-> the serial protocol itself over WiFi. Two findings drive this:
-> `runStage2PlannerInline` already covers the case where `Worker` is undefined,
-> so a Node port gets Stage 2 for free; and the firmware has **no link watchdog**
-> (`SerialProtocol.cpp:763` is a homing timeout only), so a dropped host link
-> mid-queue leaves the arm running to completion.
+> That last constraint removes the "extract the planner out of the store"
+> option as a first step. The browser keeps the serial port and keeps running
+> `moveToPosition` exactly as it does today; the bridge calls it.
 >
-> Sections 1–3 and 5–8 (where the intelligence lives, the straight-line
-> requirement, frame semantics, the tool surface, safety, latency and drift) are
-> unaffected. Section 4 is pending a rewrite once the topology is settled.
+> Sections 1–3 and 5–9 (where the intelligence lives, the straight-line
+> requirement, frame semantics, the tool surface, safety, latency and drift)
+> remain valid as written.
 
 Question this document answers: *can we expose an API so an external AI agent
 ("Roberto") can drive the arm — so that "move right" produces a real
@@ -161,53 +158,126 @@ Workspace envelope for sanity checks (`reachabilityAtlas.generated.json`):
 
 ## 4. Topology: where does the API run?
 
-A browser cannot listen on a socket, so there are three shapes.
-
-### Option A — Headless Node executor
-
-Node owns the serial port; the agent talks to Node.
-
-- Swap `SerialManager`'s transport to the `serialport` package (~50 lines; the
-  parser is already portable).
-- Extract the `moveToPosition` orchestration out of the Zustand store into a
-  framework-agnostic service. **This is the real work.**
-- Node exposes HTTP + MCP.
-
-**Pros:** works with no browser open; can run headless on a Pi; one robust daemon.
-**Cons:** biggest refactor. Serial ports are exclusive — the web UI and the
-daemon cannot both be connected, so the existing UI must be rewired through
-the daemon or abandoned. The 3D viewer stops being live feedback.
-
-### Option B — Browser stays master, local broker relays
-
-A small Node broker exposes HTTP/MCP to the agent and a WebSocket that the
-browser app dials *out* to. The browser executes commands by calling the same
-store actions the UI buttons call.
-
-**Pros:** zero duplication of kinematics; single source of truth; smallest
-diff. The UI, the 3D viewer, and the E-stop button all stay live and show
-exactly what the agent is doing — which is a genuine safety property, not just
-convenience.
-**Cons:** requires a browser tab open. Extra hop (negligible against
-multi-second planning). Background tab throttling is worth verifying if the
-user switches away.
-
-### Option C — MCP server inside the browser
-
-Not possible. A page cannot accept inbound connections.
-
-### Recommendation
-
-**Option B first, with the command contract designed so Option A drops in
-later.** Define one JSON `RobotCommand` / `RobotEvent` contract. The broker
-does not care whether the executor is a browser tab over WebSocket or an
-in-process Node executor — so Option A later becomes "swap the executor",
-not "rewrite the API".
+A browser cannot listen on a socket, so the API cannot live inside the web app.
+But the browser can dial *out*. That single fact settles the layout.
 
 ```
-Roberto ──MCP/HTTP──> broker (Node, localhost) ──WS──> browser app ──Web Serial──> Teensy
-                                                └── later: in-process Node executor
+Telegram / WhatsApp
+        │
+     Hermes ──localhost──> broker            [mac mini — always on]
+                              ▲
+                              │ WebSocket, dialled OUT by the laptop
+                              │
+             Chrome + web app ──Web Serial──> Teensy ──> arm    [laptop, at the robot]
 ```
+
+### Why the broker sits with the agent, not with the robot
+
+The intuitive placement is "broker on the laptop, because that is where the
+serial port is". That is backwards. Since the browser initiates the WebSocket,
+the broker does not need to be where the port is — and putting it next to
+Hermes buys three things:
+
+- **Hermes → broker never leaves the Mac mini.** That hop is loopback, so it
+  needs no network authentication and has no exposure.
+- **The laptop needs no inbound port** — no forwarding, no firewall rule, no
+  static address. It dials out and holds the connection open.
+- **The stable machine hosts the stable endpoint.** A laptop sleeps, moves and
+  changes IP; the always-on Mac mini does not. Pointing Hermes at a laptop
+  would mean aiming at a moving target.
+
+The only cross-machine hop is the outbound WebSocket, inside the user's own
+LAN, bearer-token authenticated. Tailscale is the upgrade path if the laptop
+should ever work from outside the house — a config change, not a redesign.
+
+### Why not a headless Node executor (yet)
+
+Owning the serial port from Node would need `SerialManager`'s transport swapped
+to `serialport` **and** the ~700-line `moveToPosition` orchestration extracted
+out of the Zustand store. Serial ports are exclusive, so the existing web UI
+would have to be rewired through the daemon or abandoned, and the 3D viewer
+would stop being live feedback.
+
+That is a refactor of the core, which conflicts directly with the add-on
+constraint. It remains the right long-term shape — and it is why the bridge
+speaks a transport-neutral `RobotCommand` / `RobotEvent` contract. The broker
+does not care whether the executor is a browser tab or an in-process Node
+executor, so that migration later becomes "swap the executor", not "rewrite
+the API".
+
+Two findings keep that door open: `runStage2PlannerInline` already handles the
+case where `Worker` is undefined, so a Node port gets Stage 2 for free; and the
+firmware has **no link watchdog** (`SerialProtocol.cpp:763` is a homing timeout
+only), which any future wireless-below-the-planner design would have to fix
+first.
+
+### Why not an ESP32 serial bridge
+
+Tempting, since the hardware is on hand, but it puts the network boundary
+*below* the planner: every one of the N `TQ PT` points would cross WiFi, and
+the E-stop path would depend on the link — with no firmware watchdog to catch a
+drop mid-queue. It also would not remove the need for a planner host. The
+governing principle is **put the network boundary above the planner**: let the
+network carry `"move 5 mm right"`, not the serial protocol.
+
+### How Hermes attaches
+
+Verified against the Hermes Agent docs: custom tools are **Python** (a plugin in
+`~/.hermes/plugins/`, or a built-in), so wrapping a plain REST endpoint costs
+code. MCP, by contrast, has been supported as a client since v0.2.0 over
+stdio / HTTP / SSE and is **configuration only**:
+
+```yaml
+# ~/.hermes/config.yaml
+mcp_servers:
+  robotarm:
+    url: "http://127.0.0.1:8765/mcp"
+    headers:
+      Authorization: "Bearer ***"
+    tools:
+      exclude: [move_relative, move_to]   # config-level kill switch for motion
+```
+
+So the broker exposes **both**: plain HTTP/JSON as the real API (for `curl`,
+debugging, and any future client) with MCP as a thin adapter over it. The
+`tools.exclude` filter is a genuine second lock, on a different layer than the
+arming switch in the browser.
+
+### 4.1 Completion and failure semantics — the easiest thing to get wrong
+
+`moveToPosition` is `async`, but **awaiting it does not mean the arm arrived.**
+The promise resolves once `TQ RUN` is acknowledged, while the motion is still
+playing out. Worse, it **never throws**: every failure path is caught and
+reported by setting `planningState: 'failed'` and `ikStatus.error`.
+
+A bridge that does `await moveToPosition(...)` and reports success would
+therefore be wrong twice over — reporting completion mid-motion, and reporting
+success on failure.
+
+The executor must instead subscribe to the store and settle on whichever comes
+first:
+
+| Signal | Meaning |
+|---|---|
+| `planningState === 'failed'` | failed — report `ikStatus.error` + `planningNotes` verbatim |
+| `TQ_DONE` → `robotState` back to `IDLE` | arrived |
+| timeout | unknown — report as such, do not claim success |
+
+### 4.2 Arming is a window, not a click
+
+Requiring a human to arm each command defeats the point when the operator is
+texting from another room. Arming is therefore a **time-boxed window** (default
+30 minutes) started at the laptop, with a visible countdown and automatic
+expiry. A human still has to have been at the machine; they just do not have to
+stay there.
+
+### 4.3 A dry run belongs in phase 1
+
+Frame semantics are the most likely thing to be wrong on first run, and the
+worst way to discover it is by watching the arm move. `preview_move` resolves
+the direction and reports the would-be target **without** calling
+`moveToPosition` — pure bridge-side FK, no store interaction, no motion. It
+ships before any motion command does.
 
 ---
 
@@ -324,34 +394,59 @@ an explicit, documented choice.
 
 ---
 
-## 9. Suggested phasing
+## 9. Phasing
 
-1. **Contract + read-only.** Define `RobotCommand`/`RobotEvent`. Ship
-   `get_status()` only. No motion. Validates the whole transport path safely.
-2. **Broker + WS executor in the browser** (Option B), still read-only.
-3. **Arming UI + `stop()`** — safety before motion.
-4. **Motion**: `move_relative` / `move_to` via `moveToPosition`, with caps,
-   busy guard, and resolved-vector echo.
-5. **MCP adapter** over the HTTP API so Roberto gets typed tools.
-6. *(Optional, later)* **Option A**: extract `moveToPosition` orchestration out
-   of the store into a service; add a Node `serialport` transport; run headless.
+**Phase 1 + 2 — implemented.** Contract, broker, browser executor, arming
+window, and the three commands that cannot move the arm:
 
-Step 6 is also independently valuable as a refactor — 700 lines of planning
-orchestration inside a Zustand store is the single biggest testability problem
-in the web app today.
+- `get_status` — connection, motors, homed joints, TCP pose, busy, last error
+- `preview_move` — dry run: resolves the direction and reports the would-be
+  target without touching the store
+- `stop` — privileged, bypasses arming and the busy guard
+
+**Phase 3 — motion.** `move_relative` / `move_to` through `moveToPosition`,
+with distance caps, the busy guard, the resolved-vector echo, and the settle
+state machine from §4.1. Gated behind phase 1+2 being tested on real hardware.
+
+**Phase 4 — MCP adapter** over the HTTP API, so Hermes attaches by config
+alone (§4).
+
+**Phase 5 — optional, later.** Extract the `moveToPosition` orchestration out
+of the store, add a Node `serialport` transport, run headless. Independently
+valuable: 700 lines of planning orchestration inside a Zustand store is the
+biggest testability problem in the web app today.
+
+### The add-on constraint, concretely
+
+Exactly one existing file is modified — `App.tsx`, one line to mount the panel.
+Everything else is new: the `robot-agent-bridge/` package, `src/agent/*`, and
+`AgentControlPanel.tsx`. Nothing in `kinematics/`, `motion/`, `services/`,
+`communication/`, `store/` or the firmware changes.
+
+The bridge connection is **opt-in and off by default**. With it off — or with
+the broker simply not running — the app behaves exactly as it does today. That
+is the property that makes this safe to merge.
 
 ---
 
-## 10. Open decisions
+## 10. Decisions
 
-These change the implementation materially and are the user's call:
+Settled:
 
-1. **Topology** — Option B (browser master, recommended) or Option A (headless
-   Node) directly?
-2. **Default frame for "right"** — `view` with a configurable yaw (recommended)
-   or plain `base` (`−Y`)?
-3. **Default step distance** when the agent says "right" without a number, and
-   the hard per-command cap.
-4. **Orientation policy** — keep tool orientation locked by default
-   (`pose_lock`, harder to solve near limits) or allow position-only fallback
-   automatically when pose-lock fails?
+1. **Topology** — broker beside the agent on the Mac mini; browser keeps the
+   serial port (§4).
+2. **Hermes attaches over MCP**, with plain HTTP/JSON underneath (§4).
+3. **Arming is a time-boxed window**, not a per-command click (§4.2).
+4. **Completion is observed from the store**, never from the `moveToPosition`
+   promise (§4.1).
+
+Still open, and only needed before phase 3:
+
+5. **Default frame for "right"** — `view` with a configurable yaw
+   (recommended) or plain `base` (`−Y`). `preview_move` exists so this can be
+   answered by experiment rather than argument.
+6. **Default step distance** when the agent gives no number, and the hard
+   per-command cap. Suggested: 50 mm default, 150 mm cap.
+7. **Orientation policy** — keep the tool orientation locked by default
+   (`pose_lock`, harder to solve near limits) or fall back to position-only
+   automatically when pose-lock fails.

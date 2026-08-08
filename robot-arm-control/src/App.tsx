@@ -4,6 +4,7 @@ import { JointControlPanel } from './components/JointControlPanel';
 import { CartesianControlPanel } from './components/CartesianControlPanel';
 import { PathPlannerPanel } from './components/PathPlannerPanel';
 import { CalibrationPanel } from './components/CalibrationPanel';
+import { AgentControlPanel } from './components/AgentControlPanel';
 import { RobotViewer3D } from './components/RobotViewer3D';
 import { StatusBar } from './components/StatusBar';
 import { EmergencyStop } from './components/EmergencyStop';
@@ -27,6 +28,7 @@ function App() {
           <CartesianControlPanel />
           <CalibrationPanel />
           <JointControlPanel />
+          <AgentControlPanel />
         </div>
 
         {/* Right panel - 3D Viewer */}
