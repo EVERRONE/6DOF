@@ -290,6 +290,23 @@ All three above were settled on the arm. Steps 2 and 5 of
 
 ## Still open
 
+### The tool frame has never been measured
+
+The model can carry one — offset and rotation, see
+[KINEMATICS.md](KINEMATICS.md#tool-frame) — and it is still zero, so the software
+treats the flange face as the tool. Every orientation the program reports or
+holds is therefore the flange's, not the tool's.
+
+Measuring it needs the arm and a gauge, and it needs to be done in several poses
+rather than one, or model error gets written into the tool frame where it cannot
+be seen. The procedure and the calibration panel that should support it are
+written up in [BRINGUP.md](BRINGUP.md#telling-a-crooked-tool-from-a-wrong-model--not-yet-built).
+**The panel does not exist yet.**
+
+Blocked behind it: the ruler checks in BRINGUP §8, which have never been done
+either, and which should come first because a scale error found with a ruler is
+far easier to attribute than the same error seen through an inclinometer.
+
 ### J4 and J5 run hot
 
 Both motors get very hot in normal use. Ruled out so far:

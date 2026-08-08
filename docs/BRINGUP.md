@@ -215,10 +215,53 @@ degrees; it remembers what you enter and prints the literal to paste into
       tool to a known attitude, put a digital inclinometer on it, and enter the
       difference. Roll and pitch come straight off the gauge; yaw needs a square
       or a straight edge against a known axis.
+
+      **Measure it in four to six different arm poses, not one.** See below.
 - [ ] Paste the printed `DEFAULT_TOOL_FRAME` into
       `robot-arm-control/src/kinematics/robotModel.ts`. Until you do, the value
       lives in one browser's local storage and another machine driving this arm
       has a different idea of where the tool is.
+
+### Telling a crooked tool from a wrong model — NOT YET BUILT
+
+**Planned for a later session. Nothing in the app does this yet; the Tool frame
+panel takes numbers but cannot help you find them.**
+
+Calibrating the tool rotation from a single pose is a trap. A tool bolted on
+crooked and an error in the kinematic model look *identical* at one pose, so
+whatever you measure there gets written into the tool frame — including every bit
+of model error that happened to be present. Move somewhere else and it reappears,
+now with the tool frame carrying a correction that no longer applies.
+
+The two are distinguishable, and the test is simple:
+
+> Measure the tool's attitude in **several different arm poses**, spread across
+> the workspace.
+>
+> **Error the same everywhere → the tool.** Write it into the tool frame.
+> **Error changes with the pose → the model.** The tool frame cannot fix it, and
+> putting it there hides it.
+
+What to build when this comes up:
+
+- A calibration panel that commands the tool to one nominal attitude — axis
+  aligned, say — at four to six different arm poses in turn.
+- A field per pose for the measured roll / pitch / yaw off a digital
+  inclinometer.
+- It solves for the constant part, which is the tool rotation, and reports the
+  **spread** separately.
+
+That spread is the valuable half. It is the first real number for how good the
+arm's kinematic model actually is, and nothing measured so far tells us that.
+
+Do the ruler checks in the list above first: a scale or direction error found
+with a ruler is much easier to attribute than the same error seen through an
+inclinometer.
+
+You will need a levelled base — otherwise this measures the bench — a digital
+inclinometer for roll and pitch, and a square for yaw.
+
+---
 
 > Fitting a tool does **not** teach the collision checker about it.
 > `collisionModel.ts` carries boxes for the links only, so a long tool can reach
