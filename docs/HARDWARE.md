@@ -290,12 +290,22 @@ All three above were settled on the arm. Steps 2 and 5 of
 
 ## Still open
 
-### The tool frame has never been measured
+### The tool frame is zero, and that is now a measurement rather than a default
 
 The model can carry one — offset and rotation, see
-[KINEMATICS.md](KINEMATICS.md#tool-frame) — and it is still zero, so the software
+[KINEMATICS.md](KINEMATICS.md#tool-frame) — and it is zero, so the software
 treats the flange face as the tool. Every orientation the program reports or
 holds is therefore the flange's, not the tool's.
+
+The **offset** was measured in 2026-08 by touching, with no tool fitted, and came
+back indistinguishable from zero — correct, and it means the touch procedure
+works. It carried a **3 mm residual**, which is this arm's first accuracy figure
+of any kind. Whether that 3 mm is aim, repeatability or model error is not yet
+known; the test that separates them is in
+[BRINGUP.md](BRINGUP.md#repeatability--not-yet-automated-and-needs-no-new-software)
+and has not been run.
+
+The **rotation** has never been measured at all.
 
 Measuring it needs the arm and a gauge, and it needs to be done in several poses
 rather than one, or model error gets written into the tool frame where it cannot

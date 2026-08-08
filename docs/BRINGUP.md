@@ -223,6 +223,27 @@ degrees; it remembers what you enter and prints the literal to paste into
       twice the radial offset, and the reported position should follow it. On a
       bare flange the reported position does not move at all, which is the
       quickest way to tell the offset is still zero.
+
+      **Done on this arm, 2026-08 — with the bare flange face, no tool fitted.**
+      The solve returned 5.2 mm of offset against a 3 mm residual and called it
+      *in the noise*, which is the right answer: a bare flange's true offset is
+      zero, and 5.2 mm does not stand clear of 3 mm of disagreement. The tool
+      frame stays at zero. Redo this once a real tool is on.
+
+      **The 3 mm is the number worth keeping.** It is the first measurement of
+      anything about this arm's accuracy, and it is three things added together:
+
+      | | what it is | moved by |
+      |---|---|---|
+      | Aim | hitting the same physical point four times | a sharper point, a slower approach |
+      | Repeatability | whether the arm returns where it was | current, belts, backlash, lost steps |
+      | Model fidelity | whether the URDF matches the metal | measuring and correcting the model |
+
+      They are not equally important. A *taught* point carries the model error
+      with it, so a consistent model error largely cancels in taught work and
+      shows up mainly when typing coordinates in. Repeatability cancels in
+      nothing. Separate the two with the next test.
+
 - [ ] **Rotation.** Level the base first, or this measures the table. Command the
       tool to a known attitude, put a digital inclinometer on it, and enter the
       difference. Roll and pitch come straight off the gauge; yaw needs a square
@@ -233,6 +254,32 @@ degrees; it remembers what you enter and prints the literal to paste into
       `robot-arm-control/src/kinematics/robotModel.ts`. Until you do, the value
       lives in one browser's local storage and another machine driving this arm
       has a different idea of where the tool is.
+
+### Repeatability — NOT YET AUTOMATED, and needs no new software
+
+Do this next. It is the one measurement that isolates the mechanics, and it is
+the only way to find out which row of the table above the 3 mm came from.
+
+> Drive to a pose. Mark where a flange edge sits against something that will not
+> move — a steel rule clamped to the bench, a machinist's block. Drive far away,
+> through a different part of the workspace. Drive back to **exactly the same
+> joint angles** — not the same XYZ. Measure the gap from the mark. Ten times.
+
+Commanding joint angles rather than a Cartesian position is the whole point: it
+takes IK, the tool frame and the kinematic model out of the measurement. What is
+left is the mechanics alone.
+
+- **Scatter well under a millimetre** → the mechanics are sound and most of the
+  3 mm is aim plus model. Chasing the model is then worth it.
+- **Scatter of the same order as 3 mm** → the mechanics are the limit. No amount
+  of calibration will make this arm land better than that, and the effort belongs
+  on driver current, belts and rigidity instead.
+- **Drift in one direction instead of scatter** → lost steps, not repeatability.
+  Driver current first, then acceleration.
+
+Come back to the pose from a different direction on half the trials. Backlash
+shows as two clusters, one per approach direction, and that is a different
+problem from random scatter with a different fix.
 
 ### Telling a crooked tool from a wrong model — NOT YET BUILT
 
