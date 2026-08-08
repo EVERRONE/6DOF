@@ -2,6 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { buildCommand, parseExecutorMessage } from './protocol.js';
 
+/** Application close codes, mirrored in src/agent/AgentBridgeClient.ts. */
+export const CLOSE_UNAUTHORIZED = 4001;
+export const CLOSE_ALREADY_CONNECTED = 4002;
+
 /**
  * Holds the WebSocket link to the executor and correlates request/response.
  *
@@ -51,17 +55,25 @@ export function createExecutorLink({ server, token, state, commandTimeoutMs, log
     // travels as a query parameter. It stays inside the LAN and never reaches
     // a third-party server, but it does mean the URL should be treated as a
     // secret (it is not logged below).
-    if (url.searchParams.get('token') !== token) {
-      rawSocket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      rawSocket.destroy();
-      log('executor rejected: bad token');
-      return;
-    }
+    // A browser cannot see why an HTTP upgrade failed — it reports a generic
+    // close either way. So rather than refusing the handshake, accept it and
+    // close with a code and reason the client can actually display. Otherwise a
+    // mistyped token looks identical to a broker that is not running.
+    const rejection = url.searchParams.get('token') !== token
+      ? { code: CLOSE_UNAUTHORIZED, reason: 'Invalid bridge token.', log: 'bad token' }
+      : socket
+        ? {
+            code: CLOSE_ALREADY_CONNECTED,
+            reason: 'Another robot app is already connected to this bridge.',
+            log: 'one is already connected'
+          }
+        : null;
 
-    if (socket) {
-      rawSocket.write('HTTP/1.1 409 Conflict\r\n\r\n');
-      rawSocket.destroy();
-      log('executor rejected: one is already connected');
+    if (rejection) {
+      wss.handleUpgrade(request, rawSocket, head, (ws) => {
+        ws.close(rejection.code, rejection.reason);
+      });
+      log(`executor rejected: ${rejection.log}`);
       return;
     }
 

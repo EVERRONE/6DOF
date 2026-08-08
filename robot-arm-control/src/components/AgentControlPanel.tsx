@@ -23,10 +23,11 @@ interface StoredSettings {
   url: string;
   token: string;
   armMinutes: number;
+  viewYawDeg: number;
 }
 
 const loadSettings = (): StoredSettings => {
-  const fallback: StoredSettings = { url: DEFAULT_URL, token: '', armMinutes: 30 };
+  const fallback: StoredSettings = { url: DEFAULT_URL, token: '', armMinutes: 30, viewYawDeg: 0 };
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return fallback;
@@ -34,7 +35,8 @@ const loadSettings = (): StoredSettings => {
     return {
       url: typeof parsed.url === 'string' && parsed.url ? parsed.url : fallback.url,
       token: typeof parsed.token === 'string' ? parsed.token : '',
-      armMinutes: typeof parsed.armMinutes === 'number' ? parsed.armMinutes : fallback.armMinutes
+      armMinutes: typeof parsed.armMinutes === 'number' ? parsed.armMinutes : fallback.armMinutes,
+      viewYawDeg: typeof parsed.viewYawDeg === 'number' ? parsed.viewYawDeg : fallback.viewYawDeg
     };
   } catch {
     return fallback;
@@ -77,24 +79,28 @@ export const AgentControlPanel: React.FC = () => {
     }
   }, [settings]);
 
-  // Drives the arming countdown.
+  // Mirrors the executor's arming state rather than tracking its own copy.
+  // The agent's `stop` command disarms the executor directly, so a separate
+  // countdown here would keep showing "Armed" after the arm had been stopped —
+  // a panel lying about a safety state is worse than no panel.
   useEffect(() => {
-    if (armedUntil === null) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    if (!enabled) return;
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      setArmedUntil(clientRef.current?.executor.getArmedUntil() ?? null);
+    }, 500);
     return () => clearInterval(timer);
-  }, [armedUntil]);
+  }, [enabled]);
 
   const armSecondsLeft = useMemo(() => {
     if (armedUntil === null) return 0;
     return Math.max(0, Math.ceil((armedUntil - now) / 1000));
   }, [armedUntil, now]);
 
+  // Keep the executor's idea of where the operator is sitting in sync.
   useEffect(() => {
-    if (armedUntil !== null && armSecondsLeft === 0) {
-      clientRef.current?.disarm();
-      setArmedUntil(null);
-    }
-  }, [armSecondsLeft, armedUntil]);
+    clientRef.current?.executor.setViewYawDeg(settings.viewYawDeg);
+  }, [settings.viewYawDeg, enabled]);
 
   const pushActivity = useCallback((entry: AgentActivityEntry) => {
     setActivity((prev) => [entry, ...prev].slice(0, 12));
@@ -120,6 +126,7 @@ export const AgentControlPanel: React.FC = () => {
     });
 
     clientRef.current = client;
+    client.executor.setViewYawDeg(settings.viewYawDeg);
     client.start();
 
     return () => {
@@ -131,13 +138,13 @@ export const AgentControlPanel: React.FC = () => {
   const handleArm = () => {
     const client = clientRef.current;
     if (!client) return;
-    client.arm(settings.armMinutes);
-    setArmedUntil(client.getArmedUntil());
+    client.executor.arm(settings.armMinutes);
+    setArmedUntil(client.executor.getArmedUntil());
     setNow(Date.now());
   };
 
   const handleDisarm = () => {
-    clientRef.current?.disarm();
+    clientRef.current?.executor.disarm();
     setArmedUntil(null);
   };
 
@@ -250,6 +257,31 @@ export const AgentControlPanel: React.FC = () => {
         {!canArm && enabled && (
           <p className="text-xs text-gray-500 mt-2">Connect to the bridge before arming.</p>
         )}
+      </div>
+
+      <div className="p-3 rounded border mb-3">
+        <label className="block text-sm font-semibold mb-1" htmlFor="agent-view-yaw">
+          Where you are standing
+        </label>
+        <p className="text-xs text-gray-600 mb-2">
+          Only used when the agent asks for the <code>view</code> frame. 0&deg; means
+          you are behind the base looking along +X, so &ldquo;right&rdquo; is &minus;Y.
+        </p>
+        <div className="flex items-center gap-2">
+          <input
+            id="agent-view-yaw"
+            type="number"
+            step={5}
+            min={-180}
+            max={180}
+            className="w-24 px-2 py-1 border rounded text-sm font-mono"
+            value={settings.viewYawDeg}
+            onChange={(e) =>
+              setSettings((s) => ({ ...s, viewYawDeg: Number(e.target.value) || 0 }))
+            }
+          />
+          <span className="text-xs text-gray-500">degrees</span>
+        </div>
       </div>
 
       <div>

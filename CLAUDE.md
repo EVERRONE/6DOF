@@ -8,7 +8,7 @@ It was audited against code on 2026-03-25.
 ## Audit Status
 
 - Web tests verified: `npm test -- --watchAll=false --runInBand`
-  - Result: 23 suites passed, 80 tests passed (as of 2026-08-08)
+  - Result: 24 suites passed, 102 tests passed (as of 2026-08-08)
 - Web production build verified: `npm run build`
   - Result: succeeds with warnings
   - Current warning: missing source map in transitive dependency `@mediapipe/tasks-vision`
