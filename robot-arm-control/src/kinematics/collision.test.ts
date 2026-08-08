@@ -5,7 +5,8 @@ import {
   isCollisionFree
 } from './CollisionChecker';
 import { ALLOWED_PAIRS, LINK_BOXES } from './collisionModel';
-import { HOME_POSE_DEG, JOINT_LIMITS_DEG, NUM_JOINTS } from './robotModel';
+import { HOME_POSE_DEG, JOINT_LIMITS_DEG, NUM_JOINTS, resetToolFrame, setToolFrame } from './robotModel';
+import { clearToolShape, flushOnFlange, setToolShape } from './toolGeometry';
 
 jest.setTimeout(120000);
 
@@ -154,5 +155,129 @@ describe('checking a path', () => {
     expect(hit).not.toBeNull();
     expect(hit!.index).toBe(2);
     expect(hit!.result.message.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('a tool on the flange', () => {
+  // The pose used throughout: clear with a bare flange, and folded enough that
+  // a 150 mm tool reaches back into the shoulder. Found by search over the joint
+  // limits, then written down - a pose regenerated per run would make a failure
+  // impossible to reproduce.
+  const FOLDED = [-71, 19, 103, 6, 178, -280];
+  const STAGE = { x: 0.08, y: 0.08, z: 0.15 };
+
+  afterEach(() => clearToolShape());
+
+  it('changes nothing while the arm is running bare', () => {
+    clearToolShape();
+    expect(checkSelfCollision([...HOME_POSE_DEG]).colliding).toBe(false);
+    expect(checkSelfCollision(FOLDED).colliding).toBe(false);
+  });
+
+  it('catches the pose that drives it into the arm', () => {
+    // The whole point. Without this the checker clears this pose and the tool
+    // goes into the shoulder at speed.
+    expect(setToolShape(flushOnFlange(STAGE)).ok).toBe(true);
+
+    const hit = checkSelfCollision(FOLDED);
+    expect(hit.colliding).toBe(true);
+    expect(hit.message).toMatch(/tool/);
+  });
+
+  it('leaves the poses the arm actually works in alone', () => {
+    // A guard that refuses the rest pose is a guard nobody will leave switched
+    // on, so this has to hold for tools well past what this arm will carry.
+    for (const size of [
+      { x: 0.04, y: 0.04, z: 0.06 },
+      { x: 0.08, y: 0.08, z: 0.15 },
+      { x: 0.12, y: 0.12, z: 0.25 }
+    ]) {
+      expect(setToolShape(flushOnFlange(size)).ok).toBe(true);
+      expect(checkSelfCollision([...HOME_POSE_DEG]).colliding).toBe(false);
+    }
+  });
+
+  it('costs reach in proportion to its size, rather than all at once', () => {
+    // Sampled across the joint limits: a bare arm loses 1.8% of poses to
+    // self-collision, and a tool takes more of the joint space the bigger it is.
+    // A number that jumped to most of the workspace would mean a box overlapping
+    // by construction rather than a tool that genuinely does not fit.
+    const refused = (size: { x: number; y: number; z: number } | null) => {
+      if (size) setToolShape(flushOnFlange(size));
+      else clearToolShape();
+      const rng = makeRng(4242);
+      let bad = 0;
+      for (let n = 0; n < 1500; n++) if (checkSelfCollision(randomPose(rng)).colliding) bad++;
+      return (100 * bad) / 1500;
+    };
+
+    const bare = refused(null);
+    const small = refused({ x: 0.04, y: 0.04, z: 0.06 });
+    const large = refused({ x: 0.12, y: 0.12, z: 0.25 });
+
+    expect(bare).toBeLessThan(4);
+    expect(small).toBeGreaterThan(bare);
+    expect(large).toBeGreaterThan(small);
+    expect(large).toBeLessThan(35);
+  });
+
+  it('hangs off the flange, not off the TCP', () => {
+    // The two are different things and confusing them is the trap this whole
+    // feature sits next to. A measured tool frame moves where the TCP is; the
+    // box is bolted metal and does not move with it. If this ever fails, a
+    // 150 mm tool starts being checked 300 mm out after somebody calibrates.
+    setToolShape(flushOnFlange(STAGE));
+    const before = checkSelfCollision(FOLDED);
+
+    setToolFrame({ xyz: { x: 0, y: 0, z: 0.15 } });
+    try {
+      const after = checkSelfCollision(FOLDED);
+      expect(after.colliding).toBe(before.colliding);
+      expect(after.message).toBe(before.message);
+    } finally {
+      resetToolFrame();
+    }
+  });
+
+  it('will not take a size that is not a size', () => {
+    expect(setToolShape(flushOnFlange({ x: 0.05, y: 0, z: 0.1 })).ok).toBe(false);
+    expect(setToolShape(flushOnFlange({ x: 0.05, y: -0.02, z: 0.1 })).ok).toBe(false);
+    expect(setToolShape({ size: { x: 0.05, y: 0.05, z: 0.1 }, centre: { x: 0, y: 0, z: NaN } }).ok)
+      .toBe(false);
+  });
+
+  it('reads a metre-long tool as a units mistake', () => {
+    // Somebody types the millimetres into the metres field. A 1500 mm tool
+    // refuses every pose, and the operator concludes the checker is broken
+    // rather than that the entry is.
+    const bad = setToolShape(flushOnFlange({ x: 1.5, y: 1.5, z: 1.5 }));
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.reason).toMatch(/millimetres/i);
+  });
+
+  it('sits flush on the flange when asked to', () => {
+    // The flange face is z = 0 and +Z points away from the arm, so a tool
+    // sitting on it has its centre half its length out. Worth pinning because
+    // getting it wrong buries the box inside the wrist, where it is checked
+    // against nothing.
+    const shape = flushOnFlange({ x: 0.04, y: 0.04, z: 0.1 });
+    expect(shape.centre.z).toBeCloseTo(0.05, 9);
+    expect(shape.centre.x).toBe(0);
+    expect(shape.centre.y).toBe(0);
+  });
+
+  it('does not start blaming the forearm', () => {
+    // The forearm's boxes enclose the wrist mount, so they overlap anything on
+    // the flange by construction - 86% of poses in the first 25 mm, with or
+    // without a tool. That pair stays off, and this is what says so: a tool must
+    // not make ordinary poses report the forearm.
+    setToolShape(flushOnFlange(STAGE));
+    const rng = makeRng(99);
+    for (let n = 0; n < 400; n++) {
+      const result = checkSelfCollision(randomPose(rng));
+      expect(result.message).not.toMatch(/forearm against tool|tool against forearm/);
+    }
   });
 });

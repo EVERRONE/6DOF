@@ -183,15 +183,20 @@ export const LINK_BOXES: OrientedBox[][] = [
  *   link0-link3    0.4%  CHECKED
  *   link1-link3    0.9%  CHECKED
  *
- * !! link3-link5 is disabled because link5 is a placeholder: a 4 mm stub at the
- * !! wrist, sized for a bare flange. Once a real tool is fitted this becomes the
- * !! pair that matters most - a pen sticking out is what will hit things - and
- * !! this model has to be regenerated around its real geometry.
- * !!
- * !! Setting a tool frame does NOT do that. The tool frame moves where the TCP
- * !! is, so FK, IK and the viewer all follow it; the boxes here are geometry and
- * !! know nothing about it. A tool can be measured, fitted and driven around
- * !! while the collision checker still believes the arm ends at the flange.
+ * The percentages above are for link5 as it stands here: a 4 mm stub sized for a
+ * bare flange, which is why none of its pairs carry anything. A real tool is
+ * added on top of this box at check time from `toolGeometry.ts`, and switches
+ * the shoulder, upper arm and elbow pairs back on - see TOOL_PAIRS in
+ * CollisionChecker.ts for the same table measured with a tool fitted.
+ *
+ * link3-link5 stays disabled either way, and the earlier note here had the
+ * reason wrong. It said the pair was disabled only because the tool was a
+ * placeholder and would matter most once something real was bolted on. Measuring
+ * it says otherwise: the forearm's boxes stop about 75 mm past the flange,
+ * because the third one encloses the wrist mount at z=103mm. The only region
+ * where they can meet a tool is the region where they overlap it by
+ * construction - 86% of poses in the first 25 mm, tool or no tool. Switching it
+ * on would refuse nearly every pose and catch nothing.
  */
 export const ALLOWED_PAIRS: ReadonlyArray<readonly [number, number]> = [
   [0, 1],

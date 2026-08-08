@@ -149,15 +149,36 @@ assistant does it.
 > pose, disabling the very pairs the margin exists to protect — the model then
 > reports its first J3 collision at 64° instead of 109°.
 
-> **The tool link is a placeholder**: a 4 mm stub sized for a bare flange, which
-> is why its pair with the forearm is disabled. Once a real tool is fitted that
-> becomes the pair that matters most — a pen sticking out is what will hit things
-> — and the model has to be regenerated around its real geometry.
->
-> Measuring a tool frame does not do this. The tool frame moves the TCP, so FK,
+**The tool is entered, not generated.** The last link in the mesh model is a 4 mm
+stub sized for a bare flange, so the generated table has every one of its pairs
+switched off — correctly, since a 4 mm stub never reaches anything. Whatever is
+actually bolted on goes in through the **Tool size** panel as a box, and switches
+the shoulder, upper arm and elbow pairs back on. Measured with a 120 mm slab at
+increasing distance from the flange face, over 4000 poses:
+
+| distance from flange | shoulder | upper arm | elbow | forearm | wrist |
+|---|---|---|---|---|---|
+| 0–25 mm | 10.9% | 5.9% | 11.6% | 86.6% | 0% |
+| 50–75 mm | 9.0% | 8.0% | 5.8% | 2.1% | 0% |
+| 100–125 mm | 6.8% | 5.2% | 0.5% | 0% | 0% |
+| 200–225 mm | 2.5% | 1.0% | 0% | 0% | 0% |
+| 325–350 mm | 0% | 0% | 0% | 0% | 0% |
+
+The forearm stays off, and the reason is not the one written here before. It is
+not that the tool is a placeholder: the forearm's boxes **stop about 75 mm past
+the flange**, because the third one encloses the wrist mount at z=103 mm. The only
+place they can meet a tool is the place they overlap it by construction, tool or
+no tool. Switching that pair on would refuse nearly every pose and catch nothing.
+
+Fitting a tool costs reach in proportion to its size — 1.8% of poses refused
+bare, 4% with 40×40×60 mm, 12% with 80×80×150, 24% with 120×120×250 — and the
+rest pose stays clear at every size.
+
+> **Measuring a tool *frame* does none of this.** The frame moves the TCP, so FK,
 > IK and the viewer follow it; the collision boxes are geometry and know nothing
-> about it. A tool can be fitted, measured and driven around while the checker
-> still believes the arm ends at the flange.
+> about it. The two panels sit next to each other and answer different questions:
+> the frame says where the tip is and changes what the arm **reports**, the box
+> says how big the tool is and changes what the arm **refuses**.
 
 Regenerate the model if the meshes or the visual transforms in
 `RobotModel3D.applyVisualTransform` change.

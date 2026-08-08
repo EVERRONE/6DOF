@@ -39,7 +39,13 @@ import {
   resetToolFrame as resetModelToolFrame,
   setToolFrame as setModelToolFrame
 } from '../kinematics/robotModel';
+import {
+  ToolShape,
+  clearToolShape as clearModelToolShape,
+  setToolShape as setModelToolShape
+} from '../kinematics/toolGeometry';
 import { loadToolFrame, saveToolFrame } from './toolFrameStorage';
+import { loadToolShape, saveToolShape } from './toolShapeStorage';
 import { ToolCalibration, ToolTouch, solveToolOffset } from '../kinematics/toolCalibration';
 import { loadWorkObjects, saveWorkObjects } from './workObjectStorage';
 import {
@@ -139,6 +145,16 @@ interface RobotStore {
    * changes.
    */
   toolFrame: ToolFrame;
+
+  /**
+   * What is bolted to the flange, as a box, or null for a bare flange. Mirrors
+   * the collision model's own copy so the UI re-renders when it changes.
+   *
+   * Nothing to do with `toolFrame`, and the two are easy to confuse. The frame
+   * says where the tool's tip is, and moves what the arm reports. This says how
+   * much space the tool takes up, and moves what the arm refuses.
+   */
+  toolShape: ToolShape | null;
 
   /** Digital I/O as the firmware last reported it, or null before it has. */
   ioState: IOState | null;
@@ -300,6 +316,17 @@ interface RobotStore {
   setToolFrame: (frame: Partial<ToolFrame>) => void;
   /** Back to the bare flange. */
   resetToolFrame: () => void;
+
+  /**
+   * Tell the collision checker how much space the tool takes up, and remember
+   * it. Returns why it was refused, or null when it was taken.
+   *
+   * Switches on the shoulder, upper arm and elbow pairs, which are disabled
+   * while the arm runs bare because a 4 mm stub never reaches any of them.
+   */
+  setToolShape: (shape: ToolShape) => string | null;
+  /** Back to a bare flange, and back to not checking the tool against anything. */
+  clearToolShape: () => void;
 
   /**
    * Touches of one fixed point, for working out where the tool tip is.
@@ -492,6 +519,20 @@ async function offerPoint(
 }
 
 /** Joint angles array to the record the serial layer wants. */
+/**
+ * Push the remembered tool box into the collision model, and hand it back for
+ * the store's own copy.
+ *
+ * Discarded silently if the model refuses it: storage can hold a shape written
+ * by an older build with different bounds, and refusing to start is a worse
+ * answer than starting bare and saying so on the next attempt to set one.
+ */
+function restoreToolShape(): ToolShape | null {
+  const stored = loadToolShape();
+  if (!stored) return null;
+  return setModelToolShape(stored).ok ? stored : null;
+}
+
 function toJointAngles(q: number[]): JointAngles {
   return { J1: q[0], J2: q[1], J3: q[2], J4: q[3], J5: q[4], J6: q[5] };
 }
@@ -570,6 +611,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   // the model's copy and the store's is only for rendering. Done at module load
   // so a remembered tool is in force before the first solve, not after it.
   toolFrame: setModelToolFrame(loadToolFrame()),
+  // Same reasoning, and it matters more: a remembered tool that reached the
+  // checker late would leave the first poses of a session checked against a bare
+  // flange, which is the one thing this exists to prevent.
+  toolShape: restoreToolShape(),
   workObjects: loadWorkObjects(),
   activeWorkObject: null,
   ioState: null,
@@ -1236,6 +1281,40 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     saveToolFrame(applied);
     set({ toolFrame: applied });
     get().afterToolFrameChange();
+  },
+
+  setToolShape: (shape) => {
+    const result = setModelToolShape(shape);
+    if (!result.ok) {
+      get().logEvent('error', `Tool size refused: ${result.reason}`);
+      return result.reason;
+    }
+
+    saveToolShape(shape);
+    set({ toolShape: { size: { ...shape.size }, centre: { ...shape.centre } } });
+
+    // Nothing to re-solve: the box changes what is refused, not where anything
+    // is. But a pose already reached may now be a colliding one, and saying so
+    // is better than waiting for the next move to be refused with no context.
+    const here = checkSelfCollision([
+      get().currentAngles.J1, get().currentAngles.J2, get().currentAngles.J3,
+      get().currentAngles.J4, get().currentAngles.J5, get().currentAngles.J6
+    ]);
+    get().logEvent(
+      here.colliding ? 'error' : 'ok',
+      here.colliding
+        ? `Tool fitted — and the arm is already in a pose that puts the ${here.message}`
+        : `Tool fitted: ${(shape.size.x * 1000).toFixed(0)}×${(shape.size.y * 1000).toFixed(0)}×` +
+          `${(shape.size.z * 1000).toFixed(0)} mm, now checked against the shoulder, upper arm and elbow`
+    );
+    return null;
+  },
+
+  clearToolShape: () => {
+    clearModelToolShape();
+    saveToolShape(null);
+    set({ toolShape: null });
+    get().logEvent('info', 'Tool geometry cleared — the checker is back to a bare flange');
   },
 
   /**

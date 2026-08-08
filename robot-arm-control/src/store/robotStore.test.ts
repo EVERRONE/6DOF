@@ -16,6 +16,8 @@ import { ExecutionState, Waypoint } from '../motion/types';
 import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG, resolveWaypoint } from '../motion/TrajectoryPlanner';
 import { rotationLog, multiply3, rpyToMatrix, transpose3 } from '../kinematics/linalg';
 import { nearestAxisAligned } from '../kinematics/axisAlign';
+import { checkSelfCollision } from '../kinematics/CollisionChecker';
+import { loadToolShape } from './toolShapeStorage';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { JOINT_LIMITS_DEG, HOME_POSE_DEG, degToRad } from '../kinematics/robotModel';
 import { FakePort, FakeSerial, commandsOfType } from '../testUtils/fakeSerial';
@@ -1721,5 +1723,97 @@ describe('store: a tool calibration that is only noise', () => {
       // Rejected outright is also a correct answer for touches of four points.
       expect(result.ok).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('store: telling the checker what is on the flange', () => {
+  // Clear with a bare flange, colliding once a 150 mm tool is fitted.
+  const FOLDED = { J1: -71, J2: 19, J3: 103, J4: 6, J5: 178, J6: -280 };
+  const STAGE = { size: { x: 0.08, y: 0.08, z: 0.15 }, centre: { x: 0, y: 0, z: 0.075 } };
+
+  afterEach(() => {
+    useRobotStore.getState().clearToolShape();
+    window.localStorage.clear();
+  });
+
+  it('starts bare, because guessing a tool would be worse than having none', () => {
+    expect(useRobotStore.getState().toolShape).toBeNull();
+  });
+
+  it('makes the checker refuse a move it used to allow', async () => {
+    // The wiring this proves: setToolShape reaches the same checker the motion
+    // guards consult. A jog rather than a move to a typed position, because the
+    // solver seeds from where the arm is and so stays in this configuration -
+    // solving a position afresh could land in a different one that does fit.
+    const { port } = await connectStore();
+    const park = () => {
+      useRobotStore.setState({ currentAngles: { ...FOLDED } });
+      useRobotStore.getState().updateCurrentPosition();
+    };
+
+    park();
+    useRobotStore.getState().setJogFrame('base');
+    await useRobotStore.getState().jogCartesian('z', 1);
+    await settle(200);
+    const bareMoves = commandsOfType(port, 'J ').length;
+    expect(bareMoves).toBeGreaterThan(0);
+
+    // Fitted: the same jog is refused, and the refusal names the tool.
+    expect(useRobotStore.getState().setToolShape(STAGE)).toBeNull();
+    park();
+    await useRobotStore.getState().jogCartesian('z', 1);
+    await settle(200);
+
+    expect(commandsOfType(port, 'J ')).toHaveLength(bareMoves);
+    expect(
+      useRobotStore.getState().events.some(e => e.kind === 'error' && /tool/.test(e.text))
+    ).toBe(true);
+  });
+
+  it('says so when fitting one puts the arm in a pose that already collides', async () => {
+    // Better than silence: the operator bolted the tool on with the arm parked
+    // somewhere it does not fit, and the next move would be refused with no
+    // obvious cause.
+    await connectStore();
+    useRobotStore.setState({ currentAngles: { ...FOLDED } });
+
+    expect(useRobotStore.getState().setToolShape(STAGE)).toBeNull();
+    expect(useRobotStore.getState().events.at(-1)!.text).toMatch(/already in a pose/i);
+  });
+
+  it('reports why a size was refused instead of taking it', async () => {
+    await connectStore();
+    const reason = useRobotStore.getState().setToolShape({
+      size: { x: 1.5, y: 1.5, z: 1.5 },
+      centre: { x: 0, y: 0, z: 0.75 }
+    });
+    expect(reason).toMatch(/millimetres/i);
+    expect(useRobotStore.getState().toolShape).toBeNull();
+  });
+
+  it('remembers it, because a forgotten tool is a guard that is off', async () => {
+    await connectStore();
+    useRobotStore.getState().setToolShape(STAGE);
+
+    // What a reload does: read storage back and push it into the model before
+    // anything is checked.
+    const stored = loadToolShape();
+    expect(stored).not.toBeNull();
+    expect(stored!.size.z).toBeCloseTo(0.15, 9);
+
+    useRobotStore.getState().clearToolShape();
+    expect(loadToolShape()).toBeNull();
+  });
+
+  it('goes back to clearing the pose when the tool comes off', async () => {
+    await connectStore();
+    useRobotStore.getState().setToolShape(STAGE);
+    const q = [FOLDED.J1, FOLDED.J2, FOLDED.J3, FOLDED.J4, FOLDED.J5, FOLDED.J6];
+    expect(checkSelfCollision(q).colliding).toBe(true);
+
+    useRobotStore.getState().clearToolShape();
+    expect(checkSelfCollision(q).colliding).toBe(false);
   });
 });

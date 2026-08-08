@@ -6,6 +6,7 @@ import { PathPlannerPanel } from './components/PathPlannerPanel';
 import { CommandConsole } from './components/CommandConsole';
 import { TuningPanel } from './components/TuningPanel';
 import { ToolFramePanel } from './components/ToolFramePanel';
+import { ToolShapePanel } from './components/ToolShapePanel';
 import { WorkObjectPanel } from './components/WorkObjectPanel';
 import { IOPanel } from './components/IOPanel';
 import { CartesianJogPanel } from './components/CartesianJogPanel';
@@ -75,6 +76,7 @@ function App() {
             {tab === 'cartesian' && (
               <>
                 <ToolFramePanel />
+                <ToolShapePanel />
                 <CartesianControlPanel />
               </>
             )}

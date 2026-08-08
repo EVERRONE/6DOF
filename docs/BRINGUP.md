@@ -255,6 +255,38 @@ degrees; it remembers what you enter and prints the literal to paste into
       lives in one browser's local storage and another machine driving this arm
       has a different idea of where the tool is.
 
+### Telling the checker how big the tool is
+
+**Do this the moment anything is bolted to the flange, before the tool frame and
+before anything else.** It takes a minute and it is the only thing standing
+between a fitted tool and the arm driving it into its own shoulder.
+
+- [ ] **Tool size** panel, on the Cartesian tab under the tool frame. Measure a
+      box around everything that moves with the flange — brackets, clamps, cable
+      loops — and enter the three sizes in millimetres. Press *sit it on the
+      flange* unless the tool hangs to one side, then *Fit it*.
+
+      Too big is the safe mistake. It is a guard, not a model.
+
+      This is **not** the tool frame, and the panels sit next to each other so
+      the difference is visible. The frame says where the tip is and changes what
+      the arm *reports*; this says how much space the tool takes and changes what
+      the arm *refuses*. A perfectly measured frame does nothing for collisions.
+
+- [ ] Check what it cost you. Fitting a tool takes joint space away —
+      about 4% of poses for a 40×40×60 mm tool, 12% for 80×80×150, 24% for
+      120×120×250, against 1.8% for the bare arm. If a pose you need is suddenly
+      refused, that is the guard working, not a bug.
+
+      The rest pose stays clear at every size. If *it* is refused, the numbers
+      entered are wrong.
+
+> The **forearm** is not checked against the tool, whatever you enter. Its boxes
+> stop about 75 mm past the flange because the third one encloses the wrist
+> mount, so the only place they can meet a tool is the place they overlap it by
+> construction. Shoulder, upper arm and elbow are checked and carry the real
+> information.
+
 ### Repeatability — MEASURED, under a millimetre
 
 The one measurement that isolates the mechanics, and the only way to find out
