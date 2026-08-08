@@ -306,6 +306,23 @@ let targetsInitialised = false;
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
+/**
+ * An id nothing else will have.
+ *
+ * Date.now() alone is not one. Two work objects added in the same millisecond -
+ * which is what happens when anything creates them in a loop, or a test does -
+ * came out with the same id, and a duplicate id is not a cosmetic problem here:
+ * frameById returns the first match, so every waypoint naming that frame
+ * silently resolves against whichever of the two happened to be added first.
+ * The same held for waypoint ids, where a duplicate breaks deletion and
+ * reordering.
+ */
+let idCounter = 0;
+function uniqueId(prefix: string): string {
+  idCounter += 1;
+  return `${prefix}-${Date.now().toString(36)}-${idCounter.toString(36)}`;
+}
+
 /** Result of offering one trajectory point to the firmware. */
 type SendOutcome = 'sent' | 'aborted' | 'paused';
 
@@ -1169,7 +1186,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     // dropJointAngles does.
     const frame = get().activeFrame();
     const newWaypoint: Waypoint = {
-      id: Date.now().toString(),
+      id: uniqueId('wp'),
       position: pointFromBase(frame, position),
       frame: frame.id === BASE_FRAME.id ? undefined : frame.id,
       jointAngles: [
@@ -1199,7 +1216,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     // Created at the base frame rather than nowhere, so it is usable - and
     // visibly untaught - before the three points are touched.
     const object: WorkObject = {
-      id: `wobj-${Date.now().toString(36)}`,
+      id: uniqueId('wobj'),
       name: name.trim() || `Work object ${get().workObjects.length + 1}`,
       origin: { x: 0, y: 0, z: 0 },
       rpy: { roll: 0, pitch: 0, yaw: 0 }

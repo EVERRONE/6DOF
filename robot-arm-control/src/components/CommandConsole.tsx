@@ -36,6 +36,16 @@ const SHORTCUTS: { label: string; command: string; title: string }[] = [
   { label: 'A', command: 'A', title: 'Abort: decelerate and drop the queue' }
 ];
 
+const COLLAPSED_KEY = 'robot-arm.console.collapsed';
+
+function loadCollapsed(): boolean {
+  try {
+    return window.localStorage?.getItem(COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
 export const CommandConsole: React.FC = () => {
   const { events, clearEvents, sendRawCommand, connectionStatus } = useRobotStore();
 
@@ -43,20 +53,87 @@ export const CommandConsole: React.FC = () => {
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [follow, setFollow] = useState(true);
+  const [collapsed, setCollapsed] = useState(loadCollapsed);
 
   const listRef = useRef<HTMLDivElement>(null);
   const connected = connectionStatus === ConnectionStatus.CONNECTED;
 
   // Keep the newest line in view, unless the user has scrolled up to read.
   useEffect(() => {
-    if (!follow || !listRef.current) return;
+    if (collapsed || !follow || !listRef.current) return;
     listRef.current.scrollTop = listRef.current.scrollHeight;
-  }, [events, follow]);
+  }, [events, follow, collapsed]);
+
+  const toggle = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    try {
+      window.localStorage?.setItem(COLLAPSED_KEY, next ? '1' : '0');
+    } catch {
+      // No storage. The choice still holds for this session, which is the part
+      // that matters.
+    }
+  };
 
   const errorCount = useMemo(
     () => events.filter(e => e.kind === 'error').length,
     [events]
   );
+
+  /**
+   * The newest line that has been on screen.
+   *
+   * Hiding the log must not hide a fault. While the console is open this tracks
+   * the latest event, so nothing counts as unseen; while it is shut it stops,
+   * and anything that arrives after becomes something to say out loud. Without
+   * it, collapsing the console would quietly turn "Endstop triggered during move
+   * on J3" into a line nobody ever reads.
+   */
+  const lastSeen = useRef(0);
+  useEffect(() => {
+    if (!collapsed && events.length > 0) {
+      lastSeen.current = events[events.length - 1].id;
+    }
+  }, [collapsed, events]);
+
+  const unseenErrors = collapsed
+    ? events.filter(e => e.kind === 'error' && e.id > lastSeen.current).length
+    : 0;
+
+  if (collapsed) {
+    return (
+      <div className="px-4 py-2 bg-white border-t flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-gray-700">
+          <button
+            onClick={toggle}
+            className="flex items-center gap-2 hover:text-gray-900"
+            title="Show the console"
+          >
+            <span className="text-gray-400">▸</span>
+            Console
+          </button>
+        </h2>
+
+        <div className="flex items-center gap-2">
+          {unseenErrors > 0 && (
+            <button
+              onClick={toggle}
+              className="px-2 py-0.5 rounded-full bg-red-600 text-white text-xs font-semibold hover:bg-red-700"
+              title="Open the console and read them"
+            >
+              {unseenErrors} new error{unseenErrors === 1 ? '' : 's'}
+            </button>
+          )}
+          {unseenErrors === 0 && errorCount > 0 && (
+            <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs">
+              {errorCount} error{errorCount === 1 ? '' : 's'}
+            </span>
+          )}
+          <span className="text-xs text-gray-400">{events.length} lines</span>
+        </div>
+      </div>
+    );
+  }
 
   const submit = async (command: string) => {
     const trimmed = command.trim();
@@ -101,13 +178,23 @@ export const CommandConsole: React.FC = () => {
   return (
     <div className="p-4 bg-white border-t">
       <div className="flex items-center justify-between mb-2">
+        {/* The title stays a heading and the toggle lives inside it. Turning the
+            whole thing into a button removed the heading role, which is what a
+            screen reader and the app's own smoke test navigate the panel by. */}
         <h2 className="text-lg font-bold">
-          Console
-          {errorCount > 0 && (
-            <span className="ml-2 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold align-middle">
-              {errorCount} error{errorCount === 1 ? '' : 's'}
-            </span>
-          )}
+          <button
+            onClick={toggle}
+            className="flex items-center gap-2 hover:text-gray-700"
+            title="Hide the console"
+          >
+            <span className="text-gray-400 text-sm">▾</span>
+            Console
+            {errorCount > 0 && (
+              <span className="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold align-middle">
+                {errorCount} error{errorCount === 1 ? '' : 's'}
+              </span>
+            )}
+          </button>
         </h2>
 
         <div className="flex items-center gap-3 text-xs">
@@ -124,6 +211,12 @@ export const CommandConsole: React.FC = () => {
             className="px-2 py-1 border rounded text-gray-600 hover:bg-gray-50"
           >
             Clear
+          </button>
+          <button
+            onClick={toggle}
+            className="px-2 py-1 border rounded text-gray-600 hover:bg-gray-50"
+          >
+            Hide
           </button>
         </div>
       </div>
