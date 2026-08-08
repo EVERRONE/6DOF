@@ -68,6 +68,16 @@ export class SerialManager {
 
   private state: ConnectionStatus = ConnectionStatus.DISCONNECTED;
 
+  /**
+   * How many of the digits on an IO line are outputs.
+   *
+   * The line itself does not say - it is `IO <o1..oN> <i1..iN>` - so the split
+   * is learned from the IONAME replies. Zero until those arrive, which makes an
+   * IO line before them read as all inputs rather than as a confident wrong
+   * answer about which pins are being driven.
+   */
+  private outputCount = 0;
+
   private messageListeners: ((msg: SerialMessage) => void)[] = [];
   private stateListeners: StateListener[] = [];
 
@@ -510,6 +520,41 @@ export class SerialManager {
             timestamp: Date.now()
           });
         }
+        return;
+      }
+
+      case 'IO': {
+        // IO <o1..oN> <i1..iN>. The split between them is not in the line, so it
+        // comes from the names the firmware reported - which is why the host asks
+        // for those on connect rather than assuming a count.
+        const flags = parts.slice(1).map(v => v === '1');
+        if (flags.length === 0) return;
+        this.emit({
+          type: 'IO',
+          data: {
+            outputs: flags.slice(0, this.outputCount),
+            inputs: flags.slice(this.outputCount)
+          },
+          timestamp
+        });
+        return;
+      }
+
+      case 'IONAME': {
+        // IONAME OUT|IN <n> <name>
+        if (parts.length < 4) return;
+        const direction = parts[1].toUpperCase() === 'OUT' ? 'out' : 'in';
+        const index = parseInt(parts[2], 10) - 1;
+        if (!Number.isFinite(index) || index < 0) return;
+
+        // Counting them here is what lets the IO line above be split correctly.
+        if (direction === 'out') this.outputCount = Math.max(this.outputCount, index + 1);
+
+        this.emit({
+          type: 'IONAME',
+          data: { direction, index, name: parts.slice(3).join(' ') },
+          timestamp
+        });
         return;
       }
 

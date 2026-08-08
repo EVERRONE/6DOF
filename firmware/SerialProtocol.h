@@ -6,6 +6,7 @@
 #include "types.h"
 #include "StepperController.h"
 #include "HomingController.h"
+#include "IOController.h"
 
 /**
  * ASCII line protocol with the host.
@@ -27,7 +28,7 @@
  */
 class SerialProtocol {
 public:
-  SerialProtocol(StepperController& stepper, HomingController& homing);
+  SerialProtocol(StepperController& stepper, HomingController& homing, IOController& io);
 
   void begin(unsigned long baudRate);
 
@@ -39,6 +40,7 @@ private:
 
   StepperController& stepper_;
   HomingController& homing_;
+  IOController& io_;
 
   char buffer_[BUFFER_SIZE];
   uint8_t length_;
@@ -58,9 +60,11 @@ private:
   void handleAbort();
   void handleQuery();
   void handleLimits(char* args);
+  void handleIO(char* args);
 
   void sendPosition();
   void sendEndstops();
+  void sendIO();
   void sendStatus();
   void sendError(const char* message);
 

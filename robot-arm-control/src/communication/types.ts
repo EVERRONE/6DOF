@@ -54,6 +54,22 @@ export interface MoveAck {
   queueFree: number;
 }
 
+/** Digital I/O as the firmware reports it. */
+export interface IOState {
+  /** What each output is driven to, in configured order. */
+  outputs: boolean[];
+  /** Each debounced input, already corrected for active-low wiring. */
+  inputs: boolean[];
+}
+
+/** A name the firmware gave one of its I/O points. */
+export interface IOName {
+  direction: 'out' | 'in';
+  /** Zero-based index within its direction. */
+  index: number;
+  name: string;
+}
+
 export type SerialMessage =
   | { type: 'POS'; data: JointAngles; timestamp: number }
   | { type: 'ENDSTOP'; data: EndstopState; timestamp: number }
@@ -62,4 +78,6 @@ export type SerialMessage =
   | { type: 'OK'; data: string; timestamp: number }
   | { type: 'ERROR'; data: string; timestamp: number }
   | { type: 'HOMED'; data: number | null; timestamp: number }
-  | { type: 'LIMIT'; data: AxisLimits; timestamp: number };
+  | { type: 'LIMIT'; data: AxisLimits; timestamp: number }
+  | { type: 'IO'; data: IOState; timestamp: number }
+  | { type: 'IONAME'; data: IOName; timestamp: number };

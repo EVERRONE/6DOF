@@ -455,6 +455,43 @@ export class TrajectoryPlanner {
   }
 
   /**
+   * For each point `flattenTrajectory` produces, the waypoint the arm has just
+   * arrived at, or null while it is still travelling.
+   *
+   * Kept beside flattenTrajectory and built by the same walk, because the two
+   * have to agree on which points exist. Reconstructing the mapping from segment
+   * lengths does not: the seam between two segments is dropped as a duplicate
+   * timestamp, so every index after the first seam is off by one, and the
+   * arrival lands on the wrong point - or on none.
+   *
+   * When the seam itself is a segment's last point, the marker moves back onto
+   * the entry that survived rather than being lost with it.
+   */
+  static waypointArrivals(trajectory: Trajectory): Array<Waypoint | null> {
+    const arrivals: Array<Waypoint | null> = [];
+    let lastTime: number | null = null;
+
+    for (const segment of trajectory.segments) {
+      const endsHere = trajectory.waypoints[segment.endWaypoint] ?? null;
+
+      for (let k = 0; k < segment.points.length; k++) {
+        const point = segment.points[k];
+        const isLast = k === segment.points.length - 1;
+
+        if (lastTime !== null && Math.abs(point.time - lastTime) < 0.001) {
+          if (isLast && arrivals.length > 0) arrivals[arrivals.length - 1] = endsHere;
+          continue;
+        }
+
+        lastTime = point.time;
+        arrivals.push(isLast ? endsHere : null);
+      }
+    }
+
+    return arrivals;
+  }
+
+  /**
    * Get the Cartesian positions along the trajectory for 3D visualization
    */
   static getTrajectoryPositions(trajectory: Trajectory): Vector3[] {

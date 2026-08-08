@@ -171,6 +171,39 @@ executing halfway through it.
 > Past what an axis can hold, a stepper loses steps in silence — nothing detects
 > it, and the position report keeps counting. Re-home after any run that ground.
 
+### `O` - digital outputs
+
+```
+O                   report the I/O names, then the current state
+O <n> <0|1>         drive one output, 1-based
+O SAFE              every output to its configured safe state
+```
+
+Replies `OK O <n> <0|1>` followed by an `IO` line carrying the new state, so the
+host never has to assume its command took effect - the same reasoning as
+reporting `enabled` in `STATUS`.
+
+A bare `O` reports the names before the state:
+
+```
+IONAME OUT 1 gripper
+IONAME IN 1 part
+IO 0 0 0 0 0 0 0 0
+```
+
+**Ask for the names.** An `IO` line does not say where the outputs end and the
+inputs begin, so the split comes from how many `IONAME OUT` lines arrived. A host
+that hardcodes a count is wrong the first time a pin moves and right about
+nothing afterwards.
+
+Outputs are driven to `OUTPUT_SAFE_STATE` at start-up and on `E 0`. **An
+emergency stop deliberately leaves them alone**: a gripper that opens mid-stop
+drops whatever it is holding, which is usually worse than the stop, and there is
+no default that is right for every tool.
+
+Rejected when the index is outside the configured set, or the value is not 0
+or 1.
+
 ---
 
 ## Reports (firmware to host)
@@ -198,6 +231,19 @@ ENDSTOP <e1> <e2> <e3> <e4> <e5> <e6>
 `1` = switch closed, `0` = open. Debounced. Joints without a switch always
 report `0`.
 
+### `IO`
+
+```
+IO <o1..oN> <i1..iN>
+```
+
+Outputs first, then inputs; `1` = driven high / input closed. Inputs are
+debounced on the same counter as the endstops, because a mechanical sensor
+bounces for milliseconds and a path step waiting on one would otherwise continue
+on a contact whisker rather than on the part arriving.
+
+The line carries no separator between the two groups - see `O` above.
+
 ### `STATUS`
 
 ```
@@ -222,6 +268,7 @@ last command rather than acting on the first `IDLE` seen.
 
 ```
 LIMIT <n> ...          one axis's motion limits, in reply to V
+IONAME OUT|IN <n> <name>   what an I/O point is called, in reply to O
 OK <text>              command accepted
 ERROR <text>           command rejected, or an asynchronous fault
 HOMED <n>              joint n finished homing (1-based)

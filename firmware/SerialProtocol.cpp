@@ -42,9 +42,10 @@ bool nextFloat(char** cursor, float* out) {
 
 }  // namespace
 
-SerialProtocol::SerialProtocol(StepperController& stepper, HomingController& homing)
+SerialProtocol::SerialProtocol(StepperController& stepper, HomingController& homing, IOController& io)
     : stepper_(stepper),
       homing_(homing),
+      io_(io),
       length_(0),
       discardLine_(false),
       lastReportMs_(0) {
@@ -123,6 +124,7 @@ void SerialProtocol::processLine(char* line) {
     case 'S': handleStop(); break;
     case 'A': handleAbort(); break;
     case 'V': handleLimits(args); break;
+    case 'O': handleIO(args); break;
     default: sendError("Unknown command"); break;
   }
 }
@@ -226,6 +228,10 @@ void SerialProtocol::handleEnable(char* args) {
 
   if (*p == '0') {
     stepper_.disable();
+    // The cell is being put down, so nothing should be left energised that
+    // nobody is watching. An emergency stop deliberately does not do this: a
+    // gripper that opens mid-stop drops whatever it is holding.
+    io_.allSafe();
     Serial.println("OK Motors disabled");
     return;
   }
@@ -362,6 +368,7 @@ void SerialProtocol::sendPeriodicReports() {
   lastReportMs_ = now;
   sendPosition();
   sendEndstops();
+  sendIO();
   sendStatus();
 }
 
@@ -385,6 +392,73 @@ void SerialProtocol::sendEndstops() {
     Serial.print(state.triggered[i] ? '1' : '0');
   }
   Serial.println();
+}
+
+void SerialProtocol::sendIO() {
+  // IO <o1..oN> <i1..iN>, digits like ENDSTOP. Outputs first, inputs after.
+  Serial.print("IO");
+  for (int i = 0; i < NUM_OUTPUTS; i++) {
+    Serial.print(' ');
+    Serial.print(io_.outputState(i) ? '1' : '0');
+  }
+  for (int i = 0; i < NUM_INPUTS; i++) {
+    Serial.print(' ');
+    Serial.print(io_.inputState(i) ? '1' : '0');
+  }
+  Serial.println();
+}
+
+/**
+ * O                 report the names, so the host does not hardcode them
+ * O <n> <0|1>       drive one output, 1-based
+ * O SAFE            every output to its configured safe state
+ */
+void SerialProtocol::handleIO(char* args) {
+  char* p = skipSpace(args);
+
+  if (*p == '\0') {
+    for (int i = 0; i < NUM_OUTPUTS; i++) {
+      Serial.print("IONAME OUT ");
+      Serial.print(i + 1);
+      Serial.print(' ');
+      Serial.println(OUTPUT_POINTS[i].name);
+    }
+    for (int i = 0; i < NUM_INPUTS; i++) {
+      Serial.print("IONAME IN ");
+      Serial.print(i + 1);
+      Serial.print(' ');
+      Serial.println(INPUT_POINTS[i].name);
+    }
+    sendIO();
+    return;
+  }
+
+  if (toupper((unsigned char)*p) == 'S') {
+    io_.allSafe();
+    Serial.println("OK O safe");
+    sendIO();
+    return;
+  }
+
+  const long index = strtol(p, &p, 10);
+  if (index < 1 || index > NUM_OUTPUTS) {
+    sendError("Output out of range");
+    return;
+  }
+
+  p = skipSpace(p);
+  if (*p != '0' && *p != '1') {
+    sendError("Output value must be 0 or 1");
+    return;
+  }
+
+  io_.setOutput((uint8_t)(index - 1), *p == '1');
+
+  Serial.print("OK O ");
+  Serial.print(index);
+  Serial.print(' ');
+  Serial.println(*p == '1' ? '1' : '0');
+  sendIO();
 }
 
 void SerialProtocol::sendStatus() {

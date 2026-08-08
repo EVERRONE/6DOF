@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { JointAngles, EndstopState, ConnectionStatus, RobotState } from '../types/robot';
 import { SerialManager } from '../communication/SerialManager';
-import { AxisLimits, FirmwareState, FirmwareStatus } from '../communication/types';
+import { AxisLimits, FirmwareState, FirmwareStatus, IOState } from '../communication/types';
 import { Vector3, Rotation3, IKResult } from '../kinematics/types';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { InverseKinematics } from '../kinematics/InverseKinematics';
@@ -128,6 +128,17 @@ interface RobotStore {
    */
   toolFrame: ToolFrame;
 
+  /** Digital I/O as the firmware last reported it, or null before it has. */
+  ioState: IOState | null;
+  /**
+   * The names the firmware gave its I/O points.
+   *
+   * Asked for rather than hardcoded. The pin a gripper is on is a fact about
+   * the machine, and a host that carried its own copy would be wrong the first
+   * time somebody moved a wire and right about nothing afterwards.
+   */
+  ioNames: { outputs: string[]; inputs: string[] };
+
   // UI state
   manualSpeed: number;
 
@@ -197,6 +208,10 @@ interface RobotStore {
    */
   waitUntilIdle: (since: number, aborted: () => boolean) => Promise<void>;
   setCartesianMode: (mode: 'linear' | 'joint') => void;
+  /** Drive one output. Zero-based. */
+  setOutput: (index: number, high: boolean) => Promise<void>;
+  /** Ask the firmware for its I/O names and current state. */
+  refreshIO: () => Promise<void>;
   setCartesianSpeed: (mmPerSecond: number) => void;
   /**
    * Set the tool frame, in the model and here, and remember it.
@@ -441,6 +456,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   toolFrame: setModelToolFrame(loadToolFrame()),
   workObjects: loadWorkObjects(),
   activeWorkObject: null,
+  ioState: null,
+  ioNames: { outputs: [], inputs: [] },
   manualSpeed: 30,
 
   // Trajectory initial state
@@ -532,6 +549,21 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
             set({ axisLimits: limits });
             break;
           }
+          case 'IO':
+            set({ ioState: msg.data });
+            break;
+          case 'IONAME': {
+            const names = { ...get().ioNames };
+            const list = [...(msg.data.direction === 'out' ? names.outputs : names.inputs)];
+            list[msg.data.index] = msg.data.name;
+            set({
+              ioNames:
+                msg.data.direction === 'out'
+                  ? { ...names, outputs: list }
+                  : { ...names, inputs: list }
+            });
+            break;
+          }
           case 'OK':
             get().logEvent('ok', msg.data);
             break;
@@ -545,6 +577,12 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     // The manager reports CONNECTING, CONNECTED and every later transition
     // through onStateChange, including a loss while this call is in flight.
     await manager.connect();
+
+    // Ask what I/O this firmware has. The names decide how an IO report is split
+    // between outputs and inputs, so without them the panel cannot tell which
+    // digits are which - and hardcoding a count here would be a copy of config.h
+    // that goes stale the first time a pin moves.
+    await get().refreshIO().catch(() => undefined);
   },
 
   // Disconnect
@@ -765,6 +803,18 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   },
 
   setCartesianMode: (mode) => set({ cartesianMode: mode }),
+
+  setOutput: async (index, high) => {
+    const { serialManager } = get();
+    if (!serialManager) return;
+    await get().sendRawCommand(`O ${index + 1} ${high ? 1 : 0}`);
+  },
+
+  refreshIO: async () => {
+    const { serialManager } = get();
+    if (!serialManager) return;
+    await get().sendRawCommand('O');
+  },
 
   setToolFrame: (frame) => {
     const applied = setModelToolFrame(frame);
@@ -1558,6 +1608,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     executionPaused = false;
 
     const allPoints = TrajectoryPlanner.flattenTrajectory(trajectory);
+    // Built by the same walk as the points themselves, so the two agree on which
+    // index is which. Reconstructing it from segment lengths does not: the seam
+    // between segments is dropped as a duplicate timestamp.
+    const arrivals = TrajectoryPlanner.waypointArrivals(trajectory);
 
     set({
       executionState: ExecutionState.EXECUTING,
@@ -1695,6 +1749,23 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
             // Do not advance: this point was not accepted, and the pause handler
             // at the top of the loop is what stops the arm.
             continue;
+          }
+
+          // Outputs attached to a waypoint fire once the arm has actually
+          // arrived, not when its last point was accepted. The firmware holds a
+          // deep queue on purpose - that is what keeps motion continuous - so an
+          // acknowledgement means "queued", and a gripper commanded on it opens
+          // seconds early, somewhere over the bench.
+          const arrived = arrivals[i] ?? null;
+          if (arrived?.setOutputs?.length) {
+            await get().waitUntilIdle(Date.now(), aborted);
+            if (aborted()) {
+              stopAndReset();
+              return;
+            }
+            for (const action of arrived.setOutputs) {
+              await get().setOutput(action.index, action.high);
+            }
           }
 
           const where = locateSegment(trajectory, i);

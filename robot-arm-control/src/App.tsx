@@ -7,6 +7,7 @@ import { CommandConsole } from './components/CommandConsole';
 import { TuningPanel } from './components/TuningPanel';
 import { ToolFramePanel } from './components/ToolFramePanel';
 import { WorkObjectPanel } from './components/WorkObjectPanel';
+import { IOPanel } from './components/IOPanel';
 import { RobotViewer3D } from './components/RobotViewer3D';
 import { StatusBar } from './components/StatusBar';
 import { EmergencyStop } from './components/EmergencyStop';
@@ -23,7 +24,8 @@ const TABS = [
   { id: 'jog', label: 'Jog', hint: 'Per-joint nudging and homing' },
   { id: 'tuning', label: 'Tuning', hint: 'Speed and acceleration, set by ear' },
   { id: 'cartesian', label: 'Cartesian', hint: 'XYZ target through IK' },
-  { id: 'paths', label: 'Paths', hint: 'Teach waypoints and play them back' }
+  { id: 'paths', label: 'Paths', hint: 'Teach waypoints and play them back' },
+  { id: 'io', label: 'I/O', hint: 'Grippers, valves and sensors' }
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -76,6 +78,7 @@ function App() {
                 <PathPlannerPanel />
               </>
             )}
+            {tab === 'io' && <IOPanel />}
           </div>
 
           {/* Always visible, whichever tab is open: what the arm said, and a way

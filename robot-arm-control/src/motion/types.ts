@@ -64,6 +64,20 @@ export interface Waypoint {
   speed: number;
   /** Label for UI display */
   label?: string;
+  /**
+   * Outputs to drive once the arm has arrived here, in order.
+   *
+   * This is what turns a path into a job. Moving to a place and doing nothing is
+   * all a path could express before; closing a gripper on arrival is the other
+   * half of picking something up.
+   *
+   * Applied **after** the arm has stopped at this waypoint, not while it is
+   * still streaming towards it. The firmware holds a deep queue precisely so
+   * that motion does not stop between points, which means a command sent when
+   * the last point was *accepted* would fire seconds before the arm gets there -
+   * with a gripper, that is the part let go somewhere over the bench.
+   */
+  setOutputs?: Array<{ index: number; high: boolean }>;
 }
 
 /**

@@ -17,6 +17,7 @@
 #include "../HomingController.h"
 #include "../MotionPlanner.h"
 #include "../SafetyMonitor.h"
+#include "../IOController.h"
 #include "../SerialProtocol.h"
 #include "../StepperController.h"
 #include "../config.h"
@@ -1090,6 +1091,133 @@ static bool logContains(const char* needle) {
 
 static void clearLog() { mock::hw.txLog.clear(); }
 
+
+// Everything the arm does besides move. Without these it can go to a place and
+// nothing else.
+static void testDigitalIO() {
+  section("protocol: digital I/O");
+
+  resetWorld();
+  StepperController stepper;
+  stepper.begin();
+  HomingController homing(stepper);
+  IOController io;
+  io.begin();
+  SerialProtocol protocol(stepper, homing, io);
+
+  // Outputs come up in their configured safe state, before anything can ask for
+  // something different. A board that reset with a gripper closed must not come
+  // back with it closed by accident.
+  for (int i = 0; i < NUM_OUTPUTS; i++) {
+    CHECK(io.outputState(i) == OUTPUT_SAFE_STATE[i]);
+    CHECK((mock::hw.level[OUTPUT_POINTS[i].pin] == HIGH) == OUTPUT_SAFE_STATE[i]);
+  }
+  pass("outputs start in their safe state, on the pins as well as in the model");
+
+  clearLog();
+  feed("O 1 1");
+  pump(protocol);
+  CHECK(io.outputState(0));
+  CHECK(mock::hw.level[OUTPUT_POINTS[0].pin] == HIGH);
+  CHECK(logContains("OK O 1 1"));
+  // The reply carries the new state, so a host never has to assume its command
+  // took effect - the same reasoning as reporting `enabled` in STATUS.
+  CHECK(logContains("IO 1 0 0 0"));
+  pass("an output can be driven, and the reply says what it became");
+
+  clearLog();
+  feed("O 1 0");
+  pump(protocol);
+  CHECK(!io.outputState(0));
+  pass("and driven back");
+
+  clearLog();
+  feed("O 9 1");
+  pump(protocol);
+  CHECK(logContains("ERROR"));
+  feed("O 1 7");
+  pump(protocol);
+  CHECK(logContains("ERROR"));
+  pass("an output outside the set, or a value that is not 0 or 1, is refused");
+
+  clearLog();
+  feed("O");
+  pump(protocol);
+  CHECK(logContains("IONAME OUT 1 gripper"));
+  CHECK(logContains("IONAME IN 1 part"));
+  pass("the names are reported, so the host does not hardcode them");
+
+  // E 0 means the cell is being put down. Anything left energised then is
+  // energised with nobody watching.
+  feed("O 1 1");
+  pump(protocol);
+  CHECK(io.outputState(0));
+  clearLog();
+  feed("E 0");
+  pump(protocol);
+  CHECK(!io.outputState(0));
+  pass("E 0 drives every output to its safe state");
+
+  // An emergency stop deliberately does not. A gripper that opens mid-stop
+  // drops whatever it was holding, which is usually worse than the stop.
+  feed("E 1");
+  pump(protocol);
+  feed("O 1 1");
+  pump(protocol);
+  CHECK(io.outputState(0));
+  clearLog();
+  feed("S");
+  pump(protocol);
+  CHECK(io.outputState(0));
+  pass("an emergency stop leaves the outputs alone, on purpose");
+
+  clearLog();
+  feed("O SAFE");
+  pump(protocol);
+  CHECK(!io.outputState(0));
+  CHECK(logContains("OK O safe"));
+  pass("and there is a command to put them down deliberately");
+}
+
+static void testInputDebounce() {
+  section("io: inputs are debounced");
+
+  resetWorld();
+  IOController io;
+
+  // Not triggered: pulled up, so the pin reads HIGH.
+  mock::hw.level[INPUT_POINTS[0].pin] = HIGH;
+  io.begin();
+  CHECK(!io.inputState(0));
+
+  // A sensor closing. One reading is not enough - a mechanical contact bounces
+  // for milliseconds, and a path step waiting on this would otherwise continue
+  // on a whisker rather than on the part arriving.
+  mock::hw.level[INPUT_POINTS[0].pin] = LOW;
+  io.update();
+  CHECK(!io.inputState(0));
+
+  for (int i = 0; i < ENDSTOP_DEBOUNCE_COUNT; i++) io.update();
+  CHECK(io.inputState(0));
+  pass("a closing input is only believed after it holds still");
+
+  // Bouncing back and forth never settles.
+  for (int i = 0; i < 20; i++) {
+    mock::hw.level[INPUT_POINTS[0].pin] = (i % 2) ? HIGH : LOW;
+    io.update();
+  }
+  mock::hw.level[INPUT_POINTS[0].pin] = HIGH;
+  for (int i = 0; i < ENDSTOP_DEBOUNCE_COUNT + 1; i++) io.update();
+  CHECK(!io.inputState(0));
+  pass("and a bouncing contact does not produce a reading until it stops");
+
+  // Reading an index that does not exist is false, not memory somewhere else.
+  CHECK(!io.inputState(NUM_INPUTS + 3));
+  CHECK(!io.outputState(NUM_OUTPUTS + 3));
+  CHECK(!io.setOutput(NUM_OUTPUTS, true));
+  pass("indices outside the configured set are refused rather than wrapped");
+}
+
 // Acceleration decides whether the arm is quiet, and it can only be set by ear.
 // Held in config.h alone that costs a re-flash per attempt.
 static void testRuntimeLimits() {
@@ -1098,7 +1226,9 @@ static void testRuntimeLimits() {
   resetWorld();
   StepperController stepper;
   HomingController homing(stepper);
-  SerialProtocol protocol(stepper, homing);
+  IOController io;
+  io.begin();
+  SerialProtocol protocol(stepper, homing, io);
   Sim sim(stepper, &homing);
   sim.registerHardware();
   stepper.begin();
@@ -1185,7 +1315,9 @@ static void testProtocol() {
   resetWorld();
   StepperController stepper;
   HomingController homing(stepper);
-  SerialProtocol protocol(stepper, homing);
+  IOController io;
+  io.begin();
+  SerialProtocol protocol(stepper, homing, io);
   Sim sim(stepper, &homing);
   sim.registerHardware();
 
@@ -1305,7 +1437,9 @@ static void testLivePositionReporting() {
   resetWorld();
   StepperController stepper;
   HomingController homing(stepper);
-  SerialProtocol protocol(stepper, homing);
+  IOController io;
+  io.begin();
+  SerialProtocol protocol(stepper, homing, io);
   Sim sim(stepper, &homing);
   sim.registerHardware();
 
@@ -1362,6 +1496,8 @@ int main() {
   testSafetyIgnoresHoming();
 
   testProtocol();
+  testDigitalIO();
+  testInputDebounce();
   testRuntimeLimits();
   testLivePositionReporting();
 

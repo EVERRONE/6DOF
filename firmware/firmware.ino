@@ -15,16 +15,22 @@
 #include "StepperController.h"
 #include "HomingController.h"
 #include "SafetyMonitor.h"
+#include "IOController.h"
 #include "SerialProtocol.h"
 
 StepperController stepper;
 HomingController homing(stepper);
 SafetyMonitor safety(stepper, homing);
-SerialProtocol protocol(stepper, homing);
+IOController io;
+SerialProtocol protocol(stepper, homing, io);
 
 void setup() {
   stepper.begin();   // also starts the step timer; drivers begin disabled
   homing.begin();
+  // Before the link opens, so a board that reset with a gripper closed comes
+  // back with it in the state somebody chose rather than the one the pin
+  // happened to power up in.
+  io.begin();
   protocol.begin(115200);
 }
 
@@ -33,6 +39,7 @@ void loop() {
   // this pass's reading.
   homing.pollEndstops();
 
+  io.update();
   protocol.update();
   stepper.service();
   homing.update();

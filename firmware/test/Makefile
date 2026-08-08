@@ -15,7 +15,8 @@ SOURCES = test_motion.cpp \
           ../StepperController.cpp \
           ../HomingController.cpp \
           ../SafetyMonitor.cpp \
-          ../SerialProtocol.cpp
+          ../SerialProtocol.cpp \
+          ../IOController.cpp
 
 TARGET = test_motion
 

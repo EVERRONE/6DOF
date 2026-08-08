@@ -36,6 +36,63 @@ const PinConfig JOINT_PINS[NUM_AXES] = {
 const uint8_t ENABLE_PIN_1 = 8;  // Active LOW - CNC shield 1 (J1-J3)
 const uint8_t ENABLE_PIN_2 = 9;  // Active LOW - CNC shield 2 (J4-J6)
 
+// ---------------------------------------------------------------------------
+// Digital I/O
+// ---------------------------------------------------------------------------
+//
+// Everything the arm has to do besides move: a gripper, a vacuum valve, a light,
+// a part-present sensor, a signal to a conveyor. Without these the arm can go to
+// a place and nothing else, which is the difference between a moving arm and a
+// robot.
+//
+// !! THESE PIN NUMBERS HAVE NOT BEEN CHECKED AGAINST THE WIRING ON THIS ARM.
+// !! They are the ones this firmware provably does not use for anything else -
+// !! step, dir, enable and endstops account for 2-9, 22-27 and 30-33 - and they
+// !! sit above the Arduino shield footprint, so a CNC shield cannot be holding
+// !! them. That is an argument, not a measurement. Check with a meter before
+// !! connecting anything, and change them here if they clash.
+//
+// Named, not numbered, because "gripper" is what an operator is thinking about
+// and pin 34 is not. The protocol addresses them by index; the names travel to
+// the app so the panel and the path steps can use them.
+
+#define NUM_OUTPUTS 4
+#define NUM_INPUTS 4
+
+struct IOPoint {
+  uint8_t pin;
+  const char* name;
+};
+
+const IOPoint OUTPUT_POINTS[NUM_OUTPUTS] = {
+  {34, "gripper"},
+  {35, "out2"},
+  {36, "out3"},
+  {37, "out4"}
+};
+
+const IOPoint INPUT_POINTS[NUM_INPUTS] = {
+  {38, "part"},
+  {39, "in2"},
+  {40, "in3"},
+  {41, "in4"}
+};
+
+// What each output is driven to at start-up and when the drivers are switched
+// off with E 0.
+//
+// E 0 means the cell is being put down, so an output left energised is one
+// nobody is watching. An emergency stop deliberately does NOT touch these: a
+// gripper that opens on a stop drops whatever it is holding, which is usually
+// worse than the stop itself, and there is no default that is right for every
+// tool. Choose per output and know which you chose.
+const bool OUTPUT_SAFE_STATE[NUM_OUTPUTS] = {false, false, false, false};
+
+// Inputs read through the same debounce as the endstops, for the same reason: a
+// mechanical sensor bounces for milliseconds, and a path step waiting on one
+// would otherwise fire on a contact whisker rather than on the part arriving.
+const bool INPUT_ACTIVE_LOW[NUM_INPUTS] = {true, true, true, true};
+
 const uint8_t ENDSTOP_NONE = 255;
 
 const uint8_t ENDSTOP_PINS[NUM_AXES] = {

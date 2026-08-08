@@ -141,6 +141,8 @@ beforeEach(() => {
     cartesianAccel: 200,
     workObjects: [],
     activeWorkObject: null,
+    ioState: null,
+    ioNames: { outputs: [], inputs: [] },
     currentAngles: {
       J1: HOME_POSE_DEG[0], J2: HOME_POSE_DEG[1], J3: HOME_POSE_DEG[2],
       J4: HOME_POSE_DEG[3], J5: HOME_POSE_DEG[4], J6: HOME_POSE_DEG[5]
@@ -1184,5 +1186,72 @@ describe('store: work objects', () => {
     const ids = useRobotStore.getState().workObjects.map(o => o.id);
     expect(ids).toContain(mine);
     expect(ids).toContain('theirs');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('store: digital I/O', () => {
+  it('reads the names, and uses them to split an IO report', async () => {
+    const { port } = await connectStore();
+
+    port.push('IONAME OUT 1 gripper\nIONAME OUT 2 out2\nIONAME IN 1 part\n');
+    await flush();
+    port.push('IO 1 0 1\n');
+    await flush();
+
+    const state = useRobotStore.getState();
+    expect(state.ioNames.outputs).toEqual(['gripper', 'out2']);
+    expect(state.ioNames.inputs).toEqual(['part']);
+    // Two outputs were named, so the first two digits are outputs and the rest
+    // are inputs. The line itself does not say where the split is.
+    expect(state.ioState).toEqual({ outputs: [true, false], inputs: [true] });
+  });
+
+  it('sends O with a one-based index', async () => {
+    const { port } = await connectStore();
+    await useRobotStore.getState().setOutput(0, true);
+    await flush();
+    expect(port.written.join('')).toContain('O 1 1');
+  });
+
+  it('fires a waypoint output only once the arm has arrived', async () => {
+    const { port } = await connectStore();
+    const store = useRobotStore.getState();
+
+    store.clearWaypoints();
+    store.updatePlannerConfig({ interpolationMode: 'joint', pointsPerSecond: 4 });
+    store.addWaypoint(makeWaypoint([0, 12, 55, 129, 131, 0], 'a'));
+    store.addWaypoint({
+      ...makeWaypoint([0, 20, 58, 129, 131, 0], 'b'),
+      setOutputs: [{ index: 0, high: true }]
+    });
+    store.planTrajectory();
+
+    const run = useRobotStore.getState().executeTrajectory();
+    await settle(40);
+
+    // The whole path has been accepted by the firmware, which only means it is
+    // queued - the arm is still working through it. Commanding the gripper here
+    // would open it somewhere over the bench.
+    expect(port.written.join('')).not.toContain('O 1 1');
+
+    port.push(STATUS_IDLE);
+    await run;
+
+    // Arrived. Now it fires.
+    expect(port.written.join('')).toContain('O 1 1');
+  });
+
+  it('leaves a waypoint without outputs alone', async () => {
+    const { port } = await connectStore();
+    planShortPath();
+
+    const run = useRobotStore.getState().executeTrajectory();
+    await settle(40);
+    port.push(STATUS_IDLE);
+    await run;
+
+    expect(port.written.join('')).not.toContain('O ');
   });
 });
