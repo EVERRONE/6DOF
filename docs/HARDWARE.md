@@ -300,10 +300,14 @@ holds is therefore the flange's, not the tool's.
 The **offset** was measured in 2026-08 by touching, with no tool fitted, and came
 back indistinguishable from zero — correct, and it means the touch procedure
 works. It carried a **3 mm residual**, which is this arm's first accuracy figure
-of any kind. Whether that 3 mm is aim, repeatability or model error is not yet
-known; the test that separates them is in
-[BRINGUP.md](BRINGUP.md#repeatability--not-yet-automated-and-needs-no-new-software)
-and has not been run.
+of any kind.
+
+That 3 mm has since been partly accounted for. Repeatability — driving away and
+returning to the same joint angles — came back **under a millimetre**, so the
+mechanics are not the limit and the rest is aim plus model error. See
+[BRINGUP.md](BRINGUP.md#repeatability--measured-under-a-millimetre). What is
+still unseparated is aim from model, and the ruler checks in BRINGUP §8 are the
+measurement that does it.
 
 The **rotation** has never been measured at all.
 
@@ -313,9 +317,10 @@ be seen. The procedure and the calibration panel that should support it are
 written up in [BRINGUP.md](BRINGUP.md#telling-a-crooked-tool-from-a-wrong-model--not-yet-built).
 **The panel does not exist yet.**
 
-Blocked behind it: the ruler checks in BRINGUP §8, which have never been done
-either, and which should come first because a scale error found with a ruler is
-far easier to attribute than the same error seen through an inclinometer.
+Do the ruler checks in BRINGUP §8 before it. They have never been done, they are
+now the next measurement in the queue on their own account — they are what
+separates aim from model in the 3 mm above — and a scale error found with a ruler
+is far easier to attribute than the same error seen through an inclinometer.
 
 ### J4 and J5 run hot
 

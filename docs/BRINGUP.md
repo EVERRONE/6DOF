@@ -255,10 +255,29 @@ degrees; it remembers what you enter and prints the literal to paste into
       lives in one browser's local storage and another machine driving this arm
       has a different idea of where the tool is.
 
-### Repeatability — NOT YET AUTOMATED, and needs no new software
+### Repeatability — MEASURED, under a millimetre
 
-Do this next. It is the one measurement that isolates the mechanics, and it is
-the only way to find out which row of the table above the 3 mm came from.
+The one measurement that isolates the mechanics, and the only way to find out
+which row of the table above the 3 mm came from. Needs no software beyond the
+Jog panel.
+
+**Result on this arm, 2026-08: under 1 mm, by eye against a fixed reference.**
+So the 3 mm from the tool touch is **not** the mechanics. It is aim plus model
+error, and most likely mostly aim — the touches were made with the flat flange
+face against the point of a nail, and a plane has no point to aim with.
+
+What follows from that:
+
+- Taught points and work objects are trustworthy at sub-millimetre level. A
+  taught point carries the model error with it and it cancels on the way back;
+  what is left is this figure.
+- Driver current, belts and acceleration are **not** the limiting factor. That
+  line of enquiry is closed unless something changes.
+- Still to do: repeat it with the arm **fully extended** — J2/J3 flat, tool as
+  far from the base as it goes. That is where gravity has the longest lever on
+  the belts and the printed parts, and one pose does not speak for the workspace.
+  Consistent sag is not a repeatability failure and cancels in taught work; it is
+  scatter that matters.
 
 > Drive to a pose. Mark where a flange edge sits against something that will not
 > move — a steel rule clamped to the bench, a machinist's block. Drive far away,
