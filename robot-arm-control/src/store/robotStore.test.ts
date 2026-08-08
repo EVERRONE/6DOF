@@ -13,7 +13,7 @@ import { useRobotStore } from './robotStore';
 import { SerialManager } from '../communication/SerialManager';
 import { ConnectionStatus, RobotState } from '../types/robot';
 import { ExecutionState, Waypoint } from '../motion/types';
-import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG } from '../motion/TrajectoryPlanner';
+import { TrajectoryPlanner, DEFAULT_PLANNER_CONFIG, resolveWaypoint } from '../motion/TrajectoryPlanner';
 import { rotationLog, multiply3, transpose3 } from '../kinematics/linalg';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { JOINT_LIMITS_DEG, HOME_POSE_DEG, degToRad } from '../kinematics/robotModel';
@@ -139,6 +139,8 @@ beforeEach(() => {
     cartesianMode: 'linear',
     cartesianSpeed: 50,
     cartesianAccel: 200,
+    workObjects: [],
+    activeWorkObject: null,
     currentAngles: {
       J1: HOME_POSE_DEG[0], J2: HOME_POSE_DEG[1], J3: HOME_POSE_DEG[2],
       J4: HOME_POSE_DEG[3], J5: HOME_POSE_DEG[4], J6: HOME_POSE_DEG[5]
@@ -1050,5 +1052,137 @@ describe('store: motion limits at runtime', () => {
     const sent = port.written.map(l => l.trim());
     expect(sent.some(l => l.startsWith('V 2 '))).toBe(true);
     expect(sent.filter(l => l === 'V').length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('store: work objects', () => {
+  const jigPoints = (): [
+    { x: number; y: number; z: number },
+    { x: number; y: number; z: number },
+    { x: number; y: number; z: number }
+  ] => {
+    const p = ForwardKinematics.position([...HOME_POSE_DEG]);
+    return [
+      { x: p.x, y: p.y, z: p.z },
+      { x: p.x + 0.1, y: p.y, z: p.z },
+      { x: p.x, y: p.y + 0.1, z: p.z }
+    ];
+  };
+
+  it('teaches a point in the active frame, not in base coordinates', async () => {
+    await connectStore();
+    const store = useRobotStore.getState();
+
+    const id = store.addWorkObject('Jig');
+    expect(store.teachWorkObject(id, jigPoints())).toBe(true);
+
+    useRobotStore.getState().updateCurrentPosition();
+    const base = useRobotStore.getState().currentPosition!;
+    useRobotStore.getState().teachCurrentPosition('hole');
+
+    const taught = useRobotStore.getState().waypoints.at(-1)!;
+    expect(taught.frame).toBe(id);
+
+    // The arm is at the jig's origin, so in the jig's own frame the point is
+    // near zero - and emphatically not the base coordinates, which are 200 mm
+    // out in X.
+    expect(Math.hypot(taught.position.x, taught.position.y, taught.position.z) * 1000)
+      .toBeLessThan(1);
+    expect(Math.hypot(base.x, base.y, base.z) * 1000).toBeGreaterThan(100);
+  });
+
+  it('moves the taught points when the frame is re-taught', async () => {
+    await connectStore();
+    const store = useRobotStore.getState();
+    const id = store.addWorkObject('Jig');
+    store.teachWorkObject(id, jigPoints());
+
+    useRobotStore.getState().updateCurrentPosition();
+    useRobotStore.getState().teachCurrentPosition('hole');
+
+    // Solving from the position rather than replaying recorded joint angles is
+    // what lets a point follow its frame at all.
+    const wpId = useRobotStore.getState().waypoints.at(-1)!.id;
+    useRobotStore.getState().dropJointAngles(wpId);
+
+    const resolvedBefore = resolveWaypoint(
+      useRobotStore.getState().waypoints.at(-1)!,
+      useRobotStore.getState().workObjects
+    ).position;
+
+    // Somebody shifts the jig 40 mm in Z. Re-teach the same three features.
+    const [a, b, c] = jigPoints();
+    const shift = (p: typeof a) => ({ ...p, z: p.z - 0.04 });
+    expect(
+      useRobotStore.getState().teachWorkObject(id, [shift(a), shift(b), shift(c)])
+    ).toBe(true);
+
+    const resolvedAfter = resolveWaypoint(
+      useRobotStore.getState().waypoints.at(-1)!,
+      useRobotStore.getState().workObjects
+    ).position;
+
+    // The waypoint was never edited, and it has moved with the fixture.
+    expect((resolvedBefore.z - resolvedAfter.z) * 1000).toBeCloseTo(40, 6);
+  });
+
+  it('says so when a deleted frame leaves waypoints behind', async () => {
+    await connectStore();
+    const store = useRobotStore.getState();
+    const id = store.addWorkObject('Jig');
+    store.teachWorkObject(id, jigPoints());
+    useRobotStore.getState().updateCurrentPosition();
+    useRobotStore.getState().teachCurrentPosition('hole');
+
+    useRobotStore.getState().removeWorkObject(id);
+
+    expect(
+      useRobotStore.getState().events.some(
+        e => e.kind === 'error' && /still name that work object/i.test(e.text)
+      )
+    ).toBe(true);
+    // The waypoint keeps the id, so the mistake stays visible and recoverable.
+    expect(useRobotStore.getState().waypoints.at(-1)!.frame).toBe(id);
+  });
+
+  it('carries the frames a path uses into its saved file, and no others', async () => {
+    await connectStore();
+    const store = useRobotStore.getState();
+    const used = store.addWorkObject('Used');
+    store.teachWorkObject(used, jigPoints());
+    useRobotStore.getState().updateCurrentPosition();
+    useRobotStore.getState().teachCurrentPosition('hole');
+
+    // A second frame nothing points at.
+    useRobotStore.getState().addWorkObject('Unused');
+
+    const saved = useRobotStore.getState().exportPath('test');
+    expect(saved.workObjects?.map(o => o.id)).toEqual([used]);
+  });
+
+  it('merges imported frames rather than replacing what is here', async () => {
+    await connectStore();
+    const store = useRobotStore.getState();
+    const mine = store.addWorkObject('Mine');
+
+    const ok = useRobotStore.getState().importPath({
+      name: 'from elsewhere',
+      version: '1.0',
+      createdAt: new Date().toISOString(),
+      config: { ...DEFAULT_PLANNER_CONFIG },
+      waypoints: [
+        { id: 'w1', position: { x: 0.01, y: 0, z: 0 }, speed: 50, frame: 'theirs' }
+      ],
+      workObjects: [
+        { id: 'theirs', name: 'Theirs', origin: { x: 0.1, y: 0, z: 0 }, rpy: { roll: 0, pitch: 0, yaw: 0 } }
+      ]
+    });
+
+    expect(ok).toBe(true);
+    const ids = useRobotStore.getState().workObjects.map(o => o.id);
+    expect(ids).toContain(mine);
+    expect(ids).toContain('theirs');
   });
 });

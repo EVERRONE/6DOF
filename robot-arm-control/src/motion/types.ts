@@ -1,6 +1,7 @@
 // Motion planning type definitions for 6DOF robot arm
 
 import { Vector3 } from '../kinematics/types';
+import { WorkObject } from '../kinematics/workObject';
 
 /**
  * A waypoint in the path (Cartesian space)
@@ -29,7 +30,25 @@ export type WaypointShape = {
 
 export interface Waypoint {
   id: string;
+  /**
+   * Where the tool should be, **in the frame named by `frame`** - not in the
+   * robot's base frame unless that is what `frame` says.
+   */
   position: Vector3;
+  /**
+   * Which work object this waypoint's position and orientation are measured in,
+   * or absent for the robot's base frame.
+   *
+   * This is what makes a taught program survive its fixture being moved: the
+   * points describe the fixture, the frame describes where the fixture is, and
+   * only the second of those has to be re-taught.
+   *
+   * Held as an id rather than a copy of the frame, deliberately. A copy would
+   * mean re-teaching the frame updated the work object and left every waypoint
+   * still pointing at where it used to be, which is the failure this exists to
+   * prevent.
+   */
+  frame?: string;
   /** When set, this waypoint is a figure centred on `position`. */
   shape?: WaypointShape;
   orientation?: { roll: number; pitch: number; yaw: number };
@@ -255,6 +274,15 @@ export interface PathPlannerConfig {
 export interface SavedPath {
   name: string;
   description?: string;
+  /**
+   * The work objects the waypoints name, carried with them.
+   *
+   * A path whose points are in a fixture's frame is meaningless without that
+   * frame: on another machine the ids resolve to nothing and every point falls
+   * back to the robot base, silently. Only the frames actually referenced are
+   * saved, so a file does not accumulate every fixture the workshop has ever had.
+   */
+  workObjects?: WorkObject[];
   waypoints: Waypoint[];
   config: PathPlannerConfig;
   createdAt: string;

@@ -29,6 +29,17 @@ import {
   setToolFrame as setModelToolFrame
 } from '../kinematics/robotModel';
 import { loadToolFrame, saveToolFrame } from './toolFrameStorage';
+import { loadWorkObjects, saveWorkObjects } from './workObjectStorage';
+import {
+  BASE_FRAME,
+  WorkObject,
+  danglingFrames,
+  frameById,
+  pointFromBase,
+  pointToBase,
+  rotationFromBase,
+  teachFromThreePoints
+} from '../kinematics/workObject';
 
 /** One line for the on-screen event log. */
 export interface RobotEvent {
@@ -221,6 +232,33 @@ interface RobotStore {
   updateWaypoint: (id: string, updates: Partial<Waypoint>) => void;
   clearWaypoints: () => void;
   teachCurrentPosition: (label?: string) => void;
+
+  // Work objects
+  /** Named frames taught points can be measured in. */
+  workObjects: WorkObject[];
+  /** Which one new points are taught into, or null for the robot base. */
+  activeWorkObject: string | null;
+  /** The active frame itself, resolved. Base when nothing is selected. */
+  activeFrame: () => WorkObject;
+  setActiveWorkObject: (id: string | null) => void;
+  /** Create one, sitting on the base frame until it is taught. Returns its id. */
+  addWorkObject: (name: string) => string;
+  renameWorkObject: (id: string, name: string) => void;
+  removeWorkObject: (id: string) => void;
+  /**
+   * Define a frame from three touched points: origin, a point on +X, and a point
+   * in the +Y half of the XY plane. Re-planning follows, because every waypoint
+   * in that frame has just moved.
+   */
+  teachWorkObject: (id: string, points: [Vector3, Vector3, Vector3]) => boolean;
+  /**
+   * Forget a waypoint's recorded joint angles, so it is solved from its position.
+   *
+   * A waypoint that carries joint angles replays them exactly and does not follow
+   * its work object. That is right for a pose taught to avoid an obstacle and
+   * wrong for a point on a fixture, and only the operator knows which.
+   */
+  dropJointAngles: (id: string) => void;
   /**
    * Append a circle to the waypoint list, centred where the tool is now.
    *
@@ -384,6 +422,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   // the model's copy and the store's is only for rendering. Done at module load
   // so a remembered tool is in force before the first solve, not after it.
   toolFrame: setModelToolFrame(loadToolFrame()),
+  workObjects: loadWorkObjects(),
+  activeWorkObject: null,
   manualSpeed: 30,
 
   // Trajectory initial state
@@ -1117,9 +1157,21 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     const position = get().currentPosition;
     if (!position) return;
 
+    // Recorded in the active work object's frame, which is the whole point of
+    // having one: the number stored describes the fixture, not where the fixture
+    // happened to be standing today.
+    //
+    // The joint angles are recorded too and are NOT in any frame - they are the
+    // arm's own. That is deliberate and it is a trap worth knowing about: a
+    // waypoint that carries joint angles is replayed from them exactly, so it
+    // will not follow its work object when the frame is re-taught. Points meant
+    // to move with a fixture have to be taught without them, which is what
+    // dropJointAngles does.
+    const frame = get().activeFrame();
     const newWaypoint: Waypoint = {
       id: Date.now().toString(),
-      position: { ...position },
+      position: pointFromBase(frame, position),
+      frame: frame.id === BASE_FRAME.id ? undefined : frame.id,
       jointAngles: [
         currentAngles.J1,
         currentAngles.J2,
@@ -1133,6 +1185,100 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     };
 
     get().addWaypoint(newWaypoint);
+  },
+
+  activeFrame: () => frameById(get().workObjects, get().activeWorkObject),
+
+  setActiveWorkObject: (id) => {
+    set({ activeWorkObject: id });
+    const frame = frameById(get().workObjects, id);
+    get().logEvent('info', `Teaching into ${frame.name}`);
+  },
+
+  addWorkObject: (name) => {
+    // Created at the base frame rather than nowhere, so it is usable - and
+    // visibly untaught - before the three points are touched.
+    const object: WorkObject = {
+      id: `wobj-${Date.now().toString(36)}`,
+      name: name.trim() || `Work object ${get().workObjects.length + 1}`,
+      origin: { x: 0, y: 0, z: 0 },
+      rpy: { roll: 0, pitch: 0, yaw: 0 }
+    };
+    set(state => ({
+      workObjects: [...state.workObjects, object],
+      activeWorkObject: object.id
+    }));
+    saveWorkObjects(get().workObjects);
+    get().logEvent('info', `Added ${object.name} — sitting on the base frame until it is taught`);
+    return object.id;
+  },
+
+  renameWorkObject: (id, name) => {
+    set(state => ({
+      workObjects: state.workObjects.map(o =>
+        o.id === id ? { ...o, name: name.trim() || o.name } : o
+      )
+    }));
+    saveWorkObjects(get().workObjects);
+  },
+
+  removeWorkObject: (id) => {
+    // Waypoints keep naming it. Resolving a missing frame falls back to base,
+    // which puts them somewhere real and wrong rather than nowhere - so say so
+    // loudly instead of deleting quietly.
+    const orphaned = get().waypoints.filter(w => w.frame === id).length;
+
+    set(state => ({
+      workObjects: state.workObjects.filter(o => o.id !== id),
+      activeWorkObject: state.activeWorkObject === id ? null : state.activeWorkObject
+    }));
+    saveWorkObjects(get().workObjects);
+
+    if (orphaned > 0) {
+      get().logEvent(
+        'error',
+        `${orphaned} waypoint${orphaned === 1 ? '' : 's'} still name that work object. ` +
+          'They now resolve against the robot base, which is not where they were taught.'
+      );
+    }
+  },
+
+  teachWorkObject: (id, points) => {
+    const result = teachFromThreePoints(points[0], points[1], points[2]);
+    if (!result.ok) {
+      get().logEvent('error', `Cannot build that frame: ${result.reason}`);
+      return false;
+    }
+
+    set(state => ({
+      workObjects: state.workObjects.map(o =>
+        o.id === id ? { ...o, origin: result.origin, rpy: result.rpy } : o
+      )
+    }));
+    saveWorkObjects(get().workObjects);
+
+    const moved = get().waypoints.filter(w => w.frame === id).length;
+    get().logEvent(
+      'info',
+      `Taught ${frameById(get().workObjects, id).name}` +
+        (moved > 0 ? ` — ${moved} waypoint${moved === 1 ? '' : 's'} moved with it` : '')
+    );
+
+    // The path was planned against the old frame.
+    if (get().trajectory) get().planTrajectory();
+    return true;
+  },
+
+  dropJointAngles: (id) => {
+    set(state => ({
+      waypoints: state.waypoints.map(w =>
+        w.id === id ? { ...w, jointAngles: undefined } : w
+      )
+    }));
+    get().logEvent(
+      'info',
+      'Waypoint will be solved from its position now, so it follows its work object'
+    );
   },
 
   addCircle: ({ radius, plane, clockwise }) => {
@@ -1167,12 +1313,19 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
     // One waypoint for the whole figure: deleting it removes the circle, not
     // forty points of it, and the planner samples the arc itself.
+    //
+    // Recorded in the active work object like any other taught point, so a
+    // circle drawn on a fixture moves with the fixture. The validation above
+    // used base coordinates deliberately - reachability is a fact about the arm,
+    // not about the frame the figure is described in.
+    const frame = get().activeFrame();
     const waypoint = makeCircleWaypoint(
       shape,
-      currentPosition,
-      orientation,
+      pointFromBase(frame, currentPosition),
+      orientation ? rotationFromBase(frame, orientation) : undefined,
       plannerConfig.defaultSpeed
     );
+    if (frame.id !== BASE_FRAME.id) waypoint.frame = frame.id;
 
     set(state => ({ waypoints: [...state.waypoints, waypoint] }));
     get().logEvent('info', `Added ${check.message}`);
@@ -1182,11 +1335,24 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   // ===== TRAJECTORY ACTIONS =====
 
   planTrajectory: () => {
-    const { waypoints, currentAngles, plannerConfig } = get();
+    const { waypoints, currentAngles, plannerConfig, workObjects } = get();
 
     if (waypoints.length === 0) {
       set({ trajectory: null, trajectoryPositions: [] });
       return;
+    }
+
+    // A waypoint naming a work object that no longer exists resolves against the
+    // base frame, which puts it somewhere real and wrong. Said once, here, rather
+    // than left for the operator to notice when the arm goes to the wrong place.
+    const dangling = danglingFrames(workObjects, waypoints.map(w => w.frame));
+    if (dangling.length > 0) {
+      get().logEvent(
+        'error',
+        `${dangling.length} work object${dangling.length === 1 ? '' : 's'} named by ` +
+          'waypoints no longer exist. Those points are being planned against the ' +
+          'robot base, which is not where they were taught.'
+      );
     }
 
     set({
@@ -1205,7 +1371,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       currentAngles.J6
     ];
 
-    const trajectory = trajectoryPlanner.planTrajectory(waypoints, startAngles);
+    const trajectory = trajectoryPlanner.planTrajectory(waypoints, startAngles, workObjects);
     const positions = TrajectoryPlanner.getTrajectoryPositions(trajectory);
 
     // Checking the waypoints is not enough: the arm can pass through itself
@@ -1631,8 +1797,15 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   // ===== PATH SAVE/LOAD =====
 
   exportPath: (name, description?) => {
-    const { waypoints, plannerConfig } = get();
-    return TrajectoryPlanner.exportPath(name, waypoints, plannerConfig, description);
+    const { waypoints, plannerConfig, workObjects } = get();
+    // The frames go with the path. Without them a saved file is a list of
+    // numbers in coordinate systems the receiving machine has never heard of,
+    // and it would run them against the robot base without complaint.
+    const referenced = new Set(waypoints.map(w => w.frame).filter(Boolean));
+    return {
+      ...TrajectoryPlanner.exportPath(name, waypoints, plannerConfig, description),
+      workObjects: workObjects.filter(o => referenced.has(o.id))
+    };
   },
 
   importPath: (savedPath) => {
@@ -1641,8 +1814,19 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       return false;
     }
 
+    // Frames from the file are merged in rather than replacing what is here: two
+    // paths can share a fixture, and importing the second must not delete the
+    // first one's frames. Same id wins from the file, because it was saved
+    // alongside the points that use it.
+    const incoming = savedPath.workObjects ?? [];
+    const merged = [
+      ...get().workObjects.filter(o => !incoming.some(i => i.id === o.id)),
+      ...incoming
+    ];
+
     set({
       waypoints: savedPath.waypoints,
+      workObjects: merged,
       plannerConfig: { ...DEFAULT_PLANNER_CONFIG, ...savedPath.config },
       trajectory: null,
       trajectoryPositions: [],
@@ -1650,6 +1834,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       executionProgress: { ...initialProgress }
     });
 
+    saveWorkObjects(merged);
     trajectoryPlanner.updateConfig(savedPath.config);
     return true;
   }

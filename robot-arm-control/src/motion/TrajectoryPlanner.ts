@@ -15,6 +15,33 @@ import { blendPolyline } from './CornerBlend';
 import { ForwardKinematics } from '../kinematics/ForwardKinematics';
 import { Rotation3, Vector3 } from '../kinematics/types';
 import { matrixToQuat, matrixToRpy, quatToMatrix, rpyToMatrix, slerp } from '../kinematics/linalg';
+import {
+  WorkObject,
+  frameById,
+  pointToBase,
+  rotationToBase
+} from '../kinematics/workObject';
+
+/**
+ * A waypoint's position and orientation in base coordinates.
+ *
+ * Everything downstream of planning works in base, so this is the one place work
+ * objects are resolved. Doing it per consumer instead would mean every stage had
+ * to remember, and the one that forgot would drive the arm to the right numbers
+ * in the wrong frame.
+ */
+export function resolveWaypoint(waypoint: Waypoint, objects: WorkObject[]): Waypoint {
+  if (!waypoint.frame) return waypoint;
+
+  const frame = frameById(objects, waypoint.frame);
+  return {
+    ...waypoint,
+    position: pointToBase(frame, waypoint.position),
+    orientation: waypoint.orientation
+      ? rotationToBase(frame, waypoint.orientation)
+      : undefined
+  };
+}
 
 /** Slerp between two attitudes, tolerating either being absent. */
 function blendRotation(
@@ -74,10 +101,25 @@ export class TrajectoryPlanner {
    * @param startAngles - Current joint angles (degrees)
    * @returns Complete trajectory with all segments
    */
-  planTrajectory(waypoints: Waypoint[], startAngles: number[]): Trajectory {
+  planTrajectory(
+    waypoints: Waypoint[],
+    startAngles: number[],
+    /**
+     * Work objects the waypoints may name. Resolved once here, at the top, so
+     * that everything below this line is in base coordinates and no later stage
+     * has to know work objects exist.
+     */
+    workObjects: WorkObject[] = []
+  ): Trajectory {
     if (waypoints.length === 0) {
       return this.createEmptyTrajectory(waypoints);
     }
+
+    // The original list is kept for the returned trajectory, because that is
+    // what the UI edits and what gets saved; only the planning below uses the
+    // resolved copies.
+    const taught = waypoints;
+    waypoints = waypoints.map(w => resolveWaypoint(w, workObjects));
 
     // Resolve all waypoints to joint angles
     const waypointAngles: number[][] = [];
@@ -115,7 +157,7 @@ export class TrajectoryPlanner {
     }
 
     if (waypointAngles.length === 0) {
-      return { ...this.createEmptyTrajectory(waypoints), skippedWaypoints };
+      return { ...this.createEmptyTrajectory(taught), skippedWaypoints };
     }
 
     // A linear path whose corners are to be rounded is planned as a whole rather
@@ -128,7 +170,7 @@ export class TrajectoryPlanner {
       resolvedWaypoints.length >= 2 &&
       !resolvedWaypoints.some(w => w.shape)
     ) {
-      return this.planBlended(waypoints, resolvedWaypoints, startAngles, heldOrientation);
+      return this.planBlended(taught, resolvedWaypoints, startAngles, heldOrientation);
     }
 
     // Plan segments between consecutive waypoints
@@ -241,7 +283,7 @@ export class TrajectoryPlanner {
       segStartAngles = endAngles;
     }
 
-    return this.summarise(segments, waypoints, skippedWaypoints);
+    return this.summarise(segments, taught, skippedWaypoints);
   }
 
   /**

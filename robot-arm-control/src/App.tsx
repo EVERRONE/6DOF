@@ -6,6 +6,7 @@ import { PathPlannerPanel } from './components/PathPlannerPanel';
 import { CommandConsole } from './components/CommandConsole';
 import { TuningPanel } from './components/TuningPanel';
 import { ToolFramePanel } from './components/ToolFramePanel';
+import { WorkObjectPanel } from './components/WorkObjectPanel';
 import { RobotViewer3D } from './components/RobotViewer3D';
 import { StatusBar } from './components/StatusBar';
 import { EmergencyStop } from './components/EmergencyStop';
@@ -69,7 +70,12 @@ function App() {
                 <CartesianControlPanel />
               </>
             )}
-            {tab === 'paths' && <PathPlannerPanel />}
+            {tab === 'paths' && (
+              <>
+                <WorkObjectPanel />
+                <PathPlannerPanel />
+              </>
+            )}
           </div>
 
           {/* Always visible, whichever tab is open: what the arm said, and a way

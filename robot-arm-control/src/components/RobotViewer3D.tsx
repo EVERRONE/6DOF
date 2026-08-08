@@ -12,6 +12,39 @@ import {
 } from '../viewer3d/RobotModel3D';
 import { Robot3DModel } from '../viewer3d/types';
 import { workspaceBounds } from '../kinematics/InverseKinematics';
+import { resolveWaypoint } from '../motion/TrajectoryPlanner';
+
+/**
+ * The active work object's own axes, drawn where it stands.
+ *
+ * A frame that exists only as six numbers in a panel is a frame nobody can
+ * check. Three points touched slightly wrong give a frame that is plausibly
+ * placed and quietly rotated, and the first sign of it would otherwise be the
+ * arm going to the wrong place. Seen against the fixture in the 3D view, a
+ * mistaken frame is obvious immediately.
+ */
+const WorkObjectAxes: React.FC = () => {
+  const { workObjects, activeWorkObject } = useRobotStore();
+  const frame = workObjects.find(o => o.id === activeWorkObject);
+
+  if (!frame) return null;
+
+  return (
+    <group
+      position={[frame.origin.x, frame.origin.y, frame.origin.z]}
+      // URDF rpy is extrinsic XYZ, which is Three.js Euler order 'ZYX' - the same
+      // convention the joint origins and the tool frame use.
+      rotation={new THREE.Euler(frame.rpy.roll, frame.rpy.pitch, frame.rpy.yaw, 'ZYX')}
+    >
+      <axesHelper args={[0.06]} />
+      <Html distanceFactor={0.6} position={[0, 0, 0.07]}>
+        <div className="px-1 text-[10px] whitespace-nowrap bg-white/80 rounded">
+          {frame.name}
+        </div>
+      </Html>
+    </group>
+  );
+};
 
 /**
  * Robot 3D Component
@@ -167,7 +200,7 @@ const TargetMarker: React.FC = () => {
  * Path Visualization - shows planned trajectory and waypoint markers in 3D
  */
 const PathVisualization: React.FC<{ visible: boolean }> = ({ visible }) => {
-  const { trajectoryPositions, waypoints } = useRobotStore();
+  const { trajectoryPositions, waypoints, workObjects } = useRobotStore();
 
   // Convert trajectory positions to THREE.Vector3 array for Line component
   const linePoints = useMemo(() => {
@@ -175,15 +208,23 @@ const PathVisualization: React.FC<{ visible: boolean }> = ({ visible }) => {
     return trajectoryPositions.map(p => new THREE.Vector3(p.x, p.y, p.z));
   }, [trajectoryPositions, visible]);
 
-  // Waypoint marker positions
+  // Waypoint marker positions.
+  //
+  // Resolved through the waypoint's work object first. A waypoint's stored
+  // position is in whatever frame it names, so drawing it raw puts the marker
+  // wherever those numbers happen to land in base coordinates - and the path
+  // line beside it, which is already resolved, would disagree with it.
   const waypointPositions = useMemo(() => {
     if (!visible) return [];
-    return waypoints.map(wp => ({
-      id: wp.id,
-      position: new THREE.Vector3(wp.position.x, wp.position.y, wp.position.z),
-      label: wp.label || ''
-    }));
-  }, [waypoints, visible]);
+    return waypoints.map(wp => {
+      const p = resolveWaypoint(wp, workObjects).position;
+      return {
+        id: wp.id,
+        position: new THREE.Vector3(p.x, p.y, p.z),
+        label: wp.label || ''
+      };
+    });
+  }, [waypoints, workObjects, visible]);
 
   if (!visible) return null;
 
@@ -390,6 +431,7 @@ export const RobotViewer3D: React.FC = () => {
 
         {/* Path Visualization */}
         <PathVisualization visible={showPath} />
+        <WorkObjectAxes />
 
         {/* Coordinate Frame at Origin */}
         <axesHelper args={[0.1]} />

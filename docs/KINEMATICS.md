@@ -623,3 +623,73 @@ with `solvePose`.
 - [URDF.md](../URDF.md) — robot structure definition
 - [SERIAL_PROTOCOL.md](SERIAL_PROTOCOL.md) — how joint targets reach the firmware
 - `firmware/config.h` — joint limits and stepper calibration
+
+---
+
+## Work objects
+
+Named frames that taught points are measured in. Everything else in the program
+is in the robot's base frame, which makes every taught point a statement about
+where a thing was *that day*: nudge the fixture five millimetres and the whole
+program is wrong, with nothing to do but teach it again.
+
+`workObject.ts` holds the frame maths, `resolveWaypoint` in `TrajectoryPlanner`
+is the one place they are resolved, and everything downstream of planning works
+in base coordinates and knows nothing about them.
+
+```
+p_base = R(frame.rpy) · p_frame + frame.origin
+R_base = R(frame.rpy) · R_frame
+```
+
+**Orientations are relative too**, and have to be — turning a fixture 90° should
+turn the attitude the tool approaches it at by 90°. Transforming only the
+position would leave a re-taught program reaching the right places the wrong way
+round.
+
+### Teaching from three points
+
+| | |
+|---|---|
+| p1 | the origin |
+| p2 | anywhere on the +X axis |
+| p3 | anywhere in the +Y half of the XY plane |
+
+Z comes from `X̂ × (p3 − p1)`, so the frame is right-handed by construction and p3
+only has to be on the correct side of the X line — its distance from it does not
+matter. Y is then recovered from Z and X rather than taken from p3, which is what
+makes the result orthogonal even though three touched points on a real fixture
+never are.
+
+Three points rather than six typed numbers because touching a fixture with the
+tool is something an operator can do accurately, and measuring its rotation
+against the robot's base with a rule is not.
+
+Refused when p1 and p2 coincide, or when the three points are collinear.
+Collinearity is judged relative to the distance from p1, so the same three points
+give the same answer in millimetres and in metres.
+
+### What follows a frame, and what does not
+
+> **A waypoint that carries recorded joint angles does not follow its work
+> object.** It is replayed from those angles exactly. That is right for a pose
+> taught to clear an obstacle and wrong for a point on a fixture, and only the
+> operator knows which — `dropJointAngles` forgets them so the point is solved
+> from its position instead.
+
+A waypoint naming a work object that no longer exists resolves against the base
+frame. That is somewhere real and wrong, so `danglingFrames` reports it and both
+deletion and planning say so loudly rather than failing silently.
+
+Frames are remembered in `localStorage` and travel inside a saved path — only
+the ones the path actually references, so a file does not accumulate every
+fixture the workshop has ever had. Importing merges rather than replaces: two
+paths can share a fixture, and loading the second must not delete the first
+one's frames.
+
+### Before teaching a frame
+
+**Set the tool frame first.** The three points come from where the arm says the
+tool tip is, and on a bare flange that is the flange face — so a frame taught
+with an unmeasured tool is offset by however far the real tip sticks out. The
+panel says so when the tool frame is still zero.
