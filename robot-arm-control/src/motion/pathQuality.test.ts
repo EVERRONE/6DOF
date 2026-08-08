@@ -84,15 +84,17 @@ describe('A. the requested tool speed', () => {
 // ---------------------------------------------------------------------------
 
 describe('B. a jump in the joint path', () => {
-  it('reaches the trajectory, where execution can refuse on it', () => {
+  it('is avoided by solving the line from its far end, and the wrist turned first', () => {
     const planner = new TrajectoryPlanner({
       interpolationMode: 'linear',
       holdToolOrientation: true
     });
 
     // Straight from the parked pose, which is the wrist singularity: J4 and J6
-    // turn the tool about the same axis there, so 44 degrees can move from one
-    // into the other between two samples 2 mm apart.
+    // turn the tool about the same axis there, so solving forwards moves 44
+    // degrees from one into the other between two samples 2 mm apart. The far
+    // end is 30 degrees clear of the singularity and well conditioned, so
+    // walking back from it never needs the reconfiguration at all.
     const start = [...HOME_POSE_DEG];
     const from = ForwardKinematics.position(start);
 
@@ -101,9 +103,42 @@ describe('B. a jump in the joint path', () => {
       start
     );
 
-    expect(traj.discontinuity).toBeTruthy();
-    expect(traj.discontinuity!.degrees).toBeGreaterThan(20);
-    expect(traj.discontinuity!.segment).toBe(0);
+    expect(traj.discontinuity).toBeNull();
+
+    // What it costs instead: the wrist has to be turned into position first.
+    const entry = traj.segments[0].reconfiguration;
+    expect(entry).toBeTruthy();
+
+    // And that turn is free at the tool. J4 and J6 are the same axis here, so
+    // counter-rotating them is exactly null-space motion - the arm reconfigures
+    // while the tool stands still.
+    const swing = Math.max(...entry!.map((v, i) => Math.abs(v - start[i])));
+    expect(swing).toBeGreaterThan(20);
+
+    for (let k = 0; k <= 20; k++) {
+      const t = k / 20;
+      const mid = start.map((v, i) => v + t * (entry![i] - v));
+      const p = ForwardKinematics.position(mid);
+      expect(dist(p, from) * 1000).toBeLessThan(0.5);
+      expect(angleBetween(fk(mid).rotation, fk(start).rotation)).toBeLessThan(0.5);
+    }
+  });
+
+  it('needs no reconfiguration when the wrist is already conditioned', () => {
+    const planner = new TrajectoryPlanner({
+      interpolationMode: 'linear',
+      holdToolOrientation: true
+    });
+    const start = offSingularity();
+    const from = ForwardKinematics.position(start);
+
+    const traj = planner.planTrajectory(
+      [waypointAt({ x: from.x, y: from.y + 0.1, z: from.z }, 'a')],
+      start
+    );
+
+    expect(traj.discontinuity).toBeNull();
+    expect(traj.segments[0].reconfiguration ?? null).toBeNull();
   });
 
   it('is absent from a path that does not go near the singularity', () => {

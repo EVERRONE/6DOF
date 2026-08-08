@@ -440,42 +440,69 @@ with the tool held:
 |---|---|---|---|---|---|---|---|
 | worst step per 2 mm | 44.1° | 20.8° | 8.3° | 4.4° | 1.9° | 1.3° | 1.0° |
 
-**What the code does about it.** `PathInterpolator.findDiscontinuity` flags a step
-that is both more than 10× the path's median step and more than 5° in absolute
-terms — relative rather than absolute, the same way MoveIt's Cartesian
-interpolator treats it, because a path where *every* step is large is merely a
-fast path. `moveAlongLine` refuses on it and says where. A joint-space move to
-the same destination is unaffected and still works: the destination is reachable
-with the orientation held, it is getting there in a straight line that is not.
+### Solving it: walk the line backwards
 
-**What it does not do.** Nothing resolves the singularity. Four things were
-tried and measured on the 100 mm move above, against a 44.1° baseline:
+Five things were tried. Four failed, all measured on the 100 mm move above
+against a 44.1° baseline:
 
 | Attempt | Result |
 |---------|--------|
 | Shorter trust region (`maxStepRad` 0.35 → 0.02) | 53.0° — worse |
 | Single seed, no restarts | 44.1° — unchanged |
 | Seed bias `μ‖q − anchor‖²` in the step only | 470° at μ=1e-4; no convergence at 1e-3 |
-| …with the accept test minimising the same augmented cost | 45.5° at μ=1e-4; 459° at 1e-3; no convergence above |
+| …with the accept test minimising the same augmented cost | 45.5° at μ=1e-4; 459° at 1e-3 |
+| Lock J4 near the singularity and solve on five joints | 463°, and 8 samples became unreachable |
+| **Solve the line from its far end** | **0.7°** |
 
-The third attempt failed because Levenberg–Marquardt's acceptance test compared
-the *task* cost while the step minimised the *augmented* cost, so the two
-disagreed about which steps were progress. The fourth fixed that — and barely
-moved the number. The reason is more basic: the weight that suppresses a free 22°
-swap is the same order as the weight that stops the solver reaching the target at
-all. There is no window between them.
+The seed bias fails because the weight that suppresses a free 22° swap is the
+same order as the weight that stops the solver reaching the target at all — no
+window between them. A weighting cannot fix a rank deficiency that is *exact*
+rather than approximate.
 
-**A weighting cannot fix a rank deficiency that is exact rather than
-approximate.** The determinant is 2.5 × 10⁻¹⁷, not merely small — J4 and J6 are
-*the same axis*, and no amount of penalty makes a direction that does not exist
-reappear. The fix is to remove the redundant freedom instead: when J5 comes
-within a threshold of the singular value, lock J4 and solve on five joints. That
-is what industrial controllers do, and it is deterministic rather than tuned.
+Locking a joint fails for a more interesting reason, and it corrected the
+diagnosis. With J4 held still the line becomes unrunnable: the tool tilts 25° and
+drifts 4.9 mm, and every sample reports unsolved. **So the wrist reconfiguration
+is not gratuitous — it is required.** Holding the tool level while J1 rotates
+genuinely needs the wrist in a different configuration, and at the parked pose it
+is in the wrong one. The 44° jump was real work, not wandering; what was wrong
+was only *where it landed* — compressed into a single 2 mm step, because each
+sample is solved greedily and that is the cheapest place to put it.
 
-Until then, the practical answer is to move J5 5–20° off 131° before asking for
-orientation-held linear motion, and the code refuses rather than thrashing:
-`moveAlongLine` on the discontinuity, and `executeTrajectory` on
-`Trajectory.discontinuity`, which aggregates the first jump across all segments.
+**The far end is 30° clear of the singularity and well conditioned.** Walked
+backwards from there, every sample stays near its predecessor and the
+reconfiguration never has to happen mid-line at all:
+
+| line from the parked pose | forwards | backwards |
+|---|---|---|
+| +Y 100 mm | 44.1° | 0.7° |
+| +Y 60 mm | 44.6° | 0.4° |
+| −Y 80 mm | 81.4° | 0.5° |
+| +Y/−Z diagonal | 25.3° | 0.7° |
+| −Z 100 mm | 0.9° | 0.9° |
+
+What it costs is that the wrist must already be in that configuration when the
+line starts, and from the parked pose it is 90° away. That is reported as
+`TrajectorySegment.reconfiguration`, and the caller turns the wrist there first.
+
+**The reconfiguration is free at the tool.** At the singularity J4 and J6 turn
+about the same axis, so counter-rotating them is exactly null-space motion —
+measured over the whole 90° turn, the tool moves **0.0 mm and tilts 0°**, with no
+self-collision anywhere along it. It is a wrist turning in place before the move
+starts, which is what an industrial controller does when it inserts a
+reconfiguration ahead of a linear path.
+
+`interpolatePiece` runs the forward pass, and only if that jumps does it pay for
+a second pass from the far end; the backward path is kept only if it is smooth
+*and* complete. `moveAlongLine` checks the reconfiguration for self-collision
+along with the path, sends it as its own move, and waits for the arm to stop
+before starting the line.
+
+**Still refused, not solved:** a line where the backward pass jumps too.
+`findDiscontinuity` flags a step both more than 10× the path's median and more
+than 5° absolute — relative rather than absolute, the same way MoveIt's Cartesian
+interpolator treats it, because a path where *every* step is large is merely a
+fast path. `executeTrajectory` refuses on `Trajectory.discontinuity`, which
+aggregates the first jump across all segments.
 
 ---
 

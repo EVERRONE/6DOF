@@ -177,6 +177,14 @@ interface RobotStore {
    * can be tested without the guards and the IK in front of it.
    */
   moveAlongLine: (position: Vector3, orientation?: Rotation3) => Promise<void>;
+  /**
+   * Wait for a STATUS reported after `since` that says the arm has stopped.
+   *
+   * Timestamped rather than "the first IDLE seen": a status can already be in
+   * flight when a move is queued, so the first one back describes the arm before
+   * the move started.
+   */
+  waitUntilIdle: (since: number, aborted: () => boolean) => Promise<void>;
   setCartesianMode: (mode: 'linear' | 'joint') => void;
   setCartesianSpeed: (mmPerSecond: number) => void;
   /**
@@ -881,8 +889,17 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
    * leaves the firmware only a 2 mm gap to fill, where the same proportional
    * interpolation cannot go far wrong. The same move then holds 0.29 degrees.
    */
+  waitUntilIdle: async (since, aborted) => {
+    for (let attempt = 0; attempt < 3000; attempt++) {
+      if (aborted()) return;
+      const { firmwareStatus, firmwareStatusAt } = get();
+      if (firmwareStatus && firmwareStatusAt > since && firmwareStatus.state === 'IDLE') return;
+      await sleep(20);
+    }
+  },
+
   moveAlongLine: async (position, orientation) => {
-    const { serialManager, currentAngles, cartesianSpeed, cartesianAccel } = get();
+    const { serialManager, currentAngles, cartesianSpeed, cartesianAccel, manualSpeed } = get();
     if (!serialManager) return;
 
     const startAngles = [
@@ -918,37 +935,70 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     // that gap by moving every joint proportionally - which is precisely the
     // problem this whole path was built to avoid, reappearing inside one step.
     //
-    // Refused rather than run. At the parked pose this is a 44 degree wrist
-    // counter-rotation demanding 753 deg/s of joints limited to 180 and 360: the
-    // firmware clamps it, so nothing breaks, but the arm spends the move
-    // thrashing and the tool does not hold its angle while it does.
+    // The interpolator has already tried solving the line from its far end, so
+    // reaching here means that did not help either.
     const jump = segment.discontinuity;
     if (jump) {
       get().logEvent(
         'error',
         `Refusing the move: J${jump.axis + 1} jumps ${jump.degrees.toFixed(0)}° ` +
-          `between two samples 2 mm apart, ${jump.atPercent}% along. The arm is ` +
-          'reconfiguring through a singularity — the tool is only held either side ' +
-          'of that jump, not through it. Move J5 away from 131° first, or use a joint path.'
+          `between two samples 2 mm apart, ${jump.atPercent}% along, and solving ` +
+          'the line from the far end does not avoid it. Move J5 away from 131° ' +
+          'first, or use a joint path.'
       );
       return;
     }
 
     // Every sample, not just the destination. A line can pass through a pose that
-    // folds the arm into itself while both of its ends are clear.
-    const collision = firstCollidingPoint(segment.points.map(p => p.jointAngles));
+    // folds the arm into itself while both of its ends are clear. The
+    // reconfiguration is checked with them: it is a real move the arm makes.
+    const reconfiguration = segment.reconfiguration ?? null;
+    const toCheck = segment.points.map(p => p.jointAngles);
+    if (reconfiguration) {
+      for (let k = 1; k < 20; k++) {
+        const t = k / 20;
+        toCheck.push(startAngles.map((v, i) => v + t * (reconfiguration[i] - v)));
+      }
+    }
+    const collision = firstCollidingPoint(toCheck);
     if (collision) {
+      const inPath = collision.index < segment.points.length;
       const atPercent = Math.round((collision.index / (segment.points.length - 1)) * 100);
       get().logEvent(
         'error',
-        `Refusing the move: the straight line folds the arm into itself ` +
-          `${atPercent}% of the way along (${collision.result.message}).`
+        inPath
+          ? `Refusing the move: the straight line folds the arm into itself ` +
+              `${atPercent}% of the way along (${collision.result.message}).`
+          : `Refusing the move: turning the wrist into position for it would put ` +
+              `the ${collision.result.message}.`
       );
       return;
     }
 
     executionAbortController = new AbortController();
     const aborted = () => executionAbortController?.signal.aborted ?? true;
+
+    // Turn the wrist into the configuration the line needs before starting it.
+    //
+    // The tool does not move while this happens: at the singularity J4 and J6
+    // turn about the same axis, so counter-rotating them is exactly null-space
+    // motion. Measured over the whole 90 degree reconfiguration the tool moves
+    // 0.0 mm and tilts 0 degrees - it is a wrist turning in place, not a detour.
+    if (reconfiguration) {
+      const swing = Math.max(...reconfiguration.map((v, i) => Math.abs(v - startAngles[i])));
+      get().logEvent(
+        'info',
+        `Turning the wrist ${swing.toFixed(0)}° into position first — the tool stays where it is`
+      );
+
+      const ack = await serialManager.moveToAngles(toJointAngles(reconfiguration), manualSpeed);
+      if (!ack.accepted) {
+        get().logEvent('error', 'Wrist reconfiguration refused: firmware queue full');
+        return;
+      }
+      await get().waitUntilIdle(Date.now(), aborted);
+      if (aborted()) return;
+    }
 
     get().logEvent(
       'sent',

@@ -276,13 +276,76 @@ export class PathInterpolator {
       Math.max(1, chordSamples, timeSamples)
     );
 
+    const forward = this.walk(piece, turn, profile, steps, startAngles, 'forward');
+
+    if (!forward.discontinuity) {
+      return { ...forward, duration, distance };
+    }
+
+    // The forward pass jumps. Try again from the far end.
+    //
+    // The jump is not the solver being capricious: running some lines with the
+    // tool held genuinely needs the wrist in a different configuration, and from
+    // the parked pose it is in the wrong one. Solving forwards, the first sample
+    // sits at the singularity where the split between J4 and J6 is arbitrary, so
+    // the solver takes the identity split and then has to migrate 90 degrees -
+    // which it does all at once, in whichever single step is cheapest.
+    //
+    // The far end is away from the singularity and well conditioned. Walked
+    // backwards from there, every sample stays near its predecessor and the
+    // reconfiguration never has to happen at all: measured on a 100 mm line from
+    // the parked pose, 44.1 degrees becomes 0.7.
+    const backward = this.walk(
+      piece,
+      turn,
+      profile,
+      steps,
+      forward.points[forward.points.length - 1].jointAngles,
+      'backward'
+    );
+
+    // No better - keep the forward pass and its discontinuity, so the caller
+    // still gets told rather than being handed a worse path silently.
+    if (backward.discontinuity || backward.points.length !== forward.points.length) {
+      return { ...forward, duration, distance };
+    }
+
+    // What the backward pass needs the arm to be in when the segment starts. The
+    // tool pose there is the same one it is in now - it is the same solve, at the
+    // same target - so getting into it is a wrist turning in place.
+    const entry = backward.points[0].jointAngles;
+    const swing = Math.max(...entry.map((v, i) => Math.abs(v - startAngles[i])));
+
+    return {
+      ...backward,
+      duration,
+      distance,
+      reconfiguration: swing > RECONFIGURE_THRESHOLD_DEG ? [...entry] : null
+    };
+  }
+
+  /**
+   * Sample a piece end to end, seeding each solve from the one before.
+   *
+   * Backwards, the samples are generated from the far end and reversed, so the
+   * seeding runs the other way while the geometry and the timing come out
+   * identical.
+   */
+  private walk(
+    piece: PathPiece,
+    turn: ((s: number) => number[][]) | null,
+    profile: VelocityProfile,
+    steps: number,
+    seedAngles: number[],
+    direction: 'forward' | 'backward'
+  ): TrajectorySegment {
     const points: TrajectoryPoint[] = [];
-    let currentAngles = [...startAngles];
+    let currentAngles = [...seedAngles];
     let failures = 0;
     let consecutiveFailures = 0;
 
     for (let k = 0; k <= steps; k++) {
-      const s = k / steps;
+      const s = direction === 'forward' ? k / steps : 1 - k / steps;
       const target = pointOnPiece(piece, s);
 
       const ik = this.solveAtMatrix(target, turn ? turn(s) : null, currentAngles);
@@ -306,6 +369,8 @@ export class PathInterpolator {
       if (consecutiveFailures >= MAX_CONSECUTIVE_IK_FAILURES) break;
     }
 
+    if (direction === 'backward') points.reverse();
+
     if (points.length > 0) {
       points[points.length - 1].velocity = Array(NUM_JOINTS).fill(0);
     }
@@ -314,8 +379,8 @@ export class PathInterpolator {
       startWaypoint: 0,
       endWaypoint: 0,
       points,
-      duration,
-      distance,
+      duration: profile.getDuration(),
+      distance: piece.length,
       unreachableSamples: failures,
       discontinuity: findDiscontinuity(points)
     };
@@ -511,6 +576,15 @@ const JUMP_FACTOR = 10;
  * step cannot take the tool far from where it should be anyway.
  */
 const JUMP_FLOOR_DEG = 5;
+
+/**
+ * How far the wrist has to be from the configuration a segment needs before the
+ * caller is told to turn it there first.
+ *
+ * Below this the difference is ordinary solver residual, and prepending a move
+ * for it would cost a stop at the start of every path.
+ */
+const RECONFIGURE_THRESHOLD_DEG = 5;
 
 /**
  * Find where the joint path jumps, if it does.

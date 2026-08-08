@@ -630,25 +630,50 @@ describe('store: Cartesian moves', () => {
     expect(worst).toBeLessThan(0.5);
   });
 
-  it('refuses a linear move that reconfigures through the wrist singularity', async () => {
+  it('turns the wrist into position before a line that starts at the singularity', async () => {
     const { port } = await connectStore();
 
     // From the parked pose, where J5 is at URDF zero and the wrist has lost a
-    // degree of freedom: J4 and J6 turn the tool about the same axis, their
-    // columns in the orientation Jacobian are identical, and the determinant is
-    // 2.5e-17. Only J4 + J6 matters, so the solver is free to move 44 degrees
-    // from one into the other between two samples 2 mm apart. The tool pose is
-    // right at both samples and wrong all the way between them, and sampling the
-    // line more finely cannot help - the jump is in joint space.
-    const from = ForwardKinematics.position([...HOME_POSE_DEG]);
+    // degree of freedom: J4 and J6 turn the tool about the same axis, so solving
+    // forwards moves 44 degrees from one into the other between two samples 2 mm
+    // apart. Solved from the far end instead - which is 30 degrees clear of the
+    // singularity - the line comes out smooth, and what it costs is that the
+    // wrist has to be turned into the right configuration first.
+    const start = [...HOME_POSE_DEG];
+    const from = ForwardKinematics.position(start);
     useRobotStore.getState().setToolLocked(true);
 
-    await useRobotStore.getState().moveToPosition({ x: from.x, y: from.y + 0.1, z: from.z });
+    expect(useRobotStore.getState().toolLocked).toBe(true);
+
+    // The reconfiguration is a move of its own, and the line does not start
+    // until the arm has finished it - so the fake firmware has to report itself
+    // idle, exactly as the real one would.
+    const run = useRobotStore.getState().moveToPosition({
+      x: from.x, y: from.y + 0.1, z: from.z
+    });
+    await settle(40);
+    port.push(STATUS_IDLE);
+    await run;
     await settle(400);
 
-    expect(commandsOfType(port, 'J ')).toHaveLength(0);
+    const moves = commandsOfType(port, 'J ');
+    expect(moves.length).toBeGreaterThan(20);
+
+    // The first command is the reconfiguration: a large wrist turn that leaves
+    // the tool exactly where it is.
+    const first = moves[0].split(/\s+/).slice(1, 7).map(Number);
+    const swing = Math.max(...first.map((v, i) => Math.abs(v - start[i])));
+    expect(swing).toBeGreaterThan(20);
     expect(
-      useRobotStore.getState().events.some(e => e.kind === 'error' && /singularity/i.test(e.text))
+      Math.hypot(
+        ...(['x', 'y', 'z'] as const).map(
+          k => ForwardKinematics.position(first)[k] - from[k]
+        )
+      ) * 1000
+    ).toBeLessThan(0.5);
+
+    expect(
+      useRobotStore.getState().events.some(e => /Turning the wrist/i.test(e.text))
     ).toBe(true);
   });
 

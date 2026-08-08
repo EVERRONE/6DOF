@@ -105,6 +105,22 @@ export interface TrajectorySegment {
     /** How far it moved, in degrees. */
     degrees: number;
   } | null;
+  /**
+   * Joint angles the arm has to be in before this segment can start, when they
+   * are not the ones it is in now.
+   *
+   * The wrist has to be in the right configuration to run some lines smoothly,
+   * and from the parked pose it is not. Rather than discovering that halfway
+   * along and flipping 44 degrees between two samples 2 mm apart, the segment is
+   * solved from its far end - where the wrist is well conditioned - and the
+   * configuration it needs at the near end is reported here.
+   *
+   * Free at the tool. At the singularity J4 and J6 turn about the same axis, so
+   * counter-rotating them is exactly null-space motion: measured over the whole
+   * 90 degree reconfiguration the tool moves 0.0 mm and tilts 0 degrees. It is a
+   * wrist turning in place before the move starts, not a detour.
+   */
+  reconfiguration?: number[] | null;
 }
 
 /**
