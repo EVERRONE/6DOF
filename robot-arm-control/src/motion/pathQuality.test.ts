@@ -351,3 +351,60 @@ describe('E. rounding a corner', () => {
     expect(closest * 1000).toBeLessThan(10);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F. A path that starts where the wrist is wrong
+// ---------------------------------------------------------------------------
+
+describe('F. the reconfiguration a whole path needs', () => {
+  it('reaches the trajectory, so execution can turn the wrist before starting', () => {
+    const planner = new TrajectoryPlanner({
+      interpolationMode: 'linear',
+      holdToolOrientation: true
+    });
+
+    const start = [...HOME_POSE_DEG];
+    const p = ForwardKinematics.position(start);
+
+    const traj = planner.planTrajectory(
+      [
+        waypointAt({ x: p.x, y: p.y + 0.08, z: p.z }, 'a'),
+        waypointAt({ x: p.x + 0.05, y: p.y + 0.08, z: p.z - 0.06 }, 'b')
+      ],
+      start
+    );
+
+    // The first segment is solved from its far end, so it wants the wrist
+    // somewhere the arm is not. Held on the segment since the backward pass
+    // existed; the trajectory did not carry it, so execution sent the jump as
+    // the path's first point instead - unannounced and unchecked.
+    expect(traj.segments[0].reconfiguration).toBeTruthy();
+    expect(traj.reconfiguration).toEqual(traj.segments[0].reconfiguration);
+
+    const entry = traj.reconfiguration!;
+    expect(Math.max(...entry.map((v, i) => Math.abs(v - start[i])))).toBeGreaterThan(20);
+
+    // And it is the same free turn a single move gets: the tool does not move.
+    for (let k = 0; k <= 20; k++) {
+      const t = k / 20;
+      const mid = start.map((v, i) => v + t * (entry[i] - v));
+      expect(dist(ForwardKinematics.position(mid), p) * 1000).toBeLessThan(0.5);
+    }
+  });
+
+  it('is null when the path starts where the wrist is already right', () => {
+    const planner = new TrajectoryPlanner({
+      interpolationMode: 'linear',
+      holdToolOrientation: true
+    });
+    const start = offSingularity();
+    const p = ForwardKinematics.position(start);
+
+    const traj = planner.planTrajectory(
+      [waypointAt({ x: p.x, y: p.y + 0.08, z: p.z }, 'a')],
+      start
+    );
+
+    expect(traj.reconfiguration ?? null).toBeNull();
+  });
+});

@@ -380,7 +380,12 @@ export class TrajectoryPlanner {
       waypoints,
       unreachableSamples: segments.reduce((sum, s) => sum + (s.unreachableSamples ?? 0), 0),
       skippedWaypoints,
-      discontinuity
+      discontinuity,
+      // Only the first segment's. Every later segment starts from the pose the
+      // previous one ended in, so its solve is already seeded there and cannot
+      // want a different configuration; the first is the only one solved against
+      // a pose the arm is actually in.
+      reconfiguration: segments[0]?.reconfiguration ?? null
     };
   }
 

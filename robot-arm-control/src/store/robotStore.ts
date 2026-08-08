@@ -1295,14 +1295,79 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     // tool pose is right at both and unconstrained through the jump.
     const jump = trajectory.discontinuity;
     if (jump) {
+      const segment = trajectory.segments[jump.segment];
+      const unreachable = segment?.unreachableSamples ?? 0;
+
+      // Where the jump falls says what caused it, and the two want different
+      // things done about them. At the start it is the wrist being in the wrong
+      // configuration for the line - the pose the arm is parked in. Part way
+      // along, the start pose is not the suspect: either the line has run out of
+      // reach and the solver has restarted from a distant seed, or the wrist
+      // crosses the singular configuration mid-leg. Telling an operator to
+      // change the start pose for a fault at 72% sends them somewhere useless.
+      const cause =
+        unreachable > 0
+          ? `${unreachable} samples of that segment have no solution at all, so the ` +
+            'line runs out of reach part way and the solver restarts somewhere else. ' +
+            'Holding the tool costs a lot of reach — shorten that leg, or free the tool for it.'
+          : jump.atPercent <= 15
+            ? 'The wrist is in the wrong configuration for this line. Turn J5 away ' +
+              'from 131° before starting, or run this leg in joint mode.'
+            : 'The wrist crosses its singular configuration part way along this leg. ' +
+              'Put a waypoint either side of where it happens, or run this leg in joint mode.';
+
       get().logEvent(
         'error',
         `Refusing to run the path: J${jump.axis + 1} jumps ${jump.degrees.toFixed(0)}° ` +
-          `between two samples in segment ${jump.segment + 1}, ${jump.atPercent}% along it. ` +
-          'The arm is reconfiguring through a singularity — move J5 away from 131°, ' +
-          'or plan this stretch in joint mode.'
+          `between two samples in segment ${jump.segment + 1}, ${jump.atPercent}% along it — ` +
+          `about ${(jump.degrees / 180).toFixed(1)} half-turns while the tool moves 2 mm. ` +
+          cause
       );
       return;
+    }
+
+    // The path may need the wrist in a configuration the arm is not in: its
+    // first segment can have been solved from its far end, which is what keeps
+    // the line smooth but leaves the near end wanting a different wrist. Without
+    // this the first point of the path simply *is* that jump, unannounced and
+    // unchecked.
+    //
+    // Free at the tool - J4 and J6 are the same axis there, so counter-rotating
+    // them is null-space motion - but a real move, so it is checked for
+    // collisions and waited on like any other.
+    const entry = trajectory.reconfiguration;
+    if (entry) {
+      const here = [
+        get().currentAngles.J1, get().currentAngles.J2, get().currentAngles.J3,
+        get().currentAngles.J4, get().currentAngles.J5, get().currentAngles.J6
+      ];
+      const swing = Math.max(...entry.map((v, i) => Math.abs(v - here[i])));
+
+      const sweep: number[][] = [];
+      for (let k = 1; k <= 20; k++) {
+        const t = k / 20;
+        sweep.push(here.map((v, i) => v + t * (entry[i] - v)));
+      }
+      const hit = firstCollidingPoint(sweep);
+      if (hit) {
+        get().logEvent(
+          'error',
+          `Refusing to run the path: turning the wrist into position for it would ` +
+            `put the ${hit.result.message}.`
+        );
+        return;
+      }
+
+      get().logEvent(
+        'info',
+        `Turning the wrist ${swing.toFixed(0)}° into position first — the tool stays where it is`
+      );
+      const ack = await serialManager.moveToAngles(toJointAngles(entry), get().manualSpeed);
+      if (!ack.accepted) {
+        get().logEvent('error', 'Wrist reconfiguration refused: firmware queue full');
+        return;
+      }
+      await get().waitUntilIdle(Date.now(), () => false);
     }
 
     // Set up abort controller

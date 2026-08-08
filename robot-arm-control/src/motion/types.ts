@@ -151,6 +151,15 @@ export interface Trajectory {
   discontinuity?:
     | (NonNullable<TrajectorySegment['discontinuity']> & { segment: number })
     | null;
+  /**
+   * Joint angles the arm has to be turned to before the path can start, or null.
+   *
+   * Only the first segment's, because every later one begins where the previous
+   * ended. A segment solved from its far end can want the wrist in a
+   * configuration the arm is not in - 90 degrees away, from the parked pose -
+   * and the first point of the path would otherwise be that jump, unannounced.
+   */
+  reconfiguration?: number[] | null;
 }
 
 /**
