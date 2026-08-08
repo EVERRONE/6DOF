@@ -533,6 +533,21 @@ function restoreToolShape(): ToolShape | null {
   return setModelToolShape(stored).ok ? stored : null;
 }
 
+/**
+ * Whether a waypoint does anything once the arm gets there.
+ *
+ * Worth asking before waiting for the arm to stop, because that wait is what
+ * breaks the motion: the firmware's queue is what carries speed through a
+ * waypoint, and draining it to fire nothing costs a full stop at every point.
+ */
+function hasArrivalWork(wp: Waypoint): boolean {
+  return Boolean(
+    wp.setOutputs?.length ||
+    wp.waitForInput ||
+    (wp.dwellSeconds !== undefined && wp.dwellSeconds > 0)
+  );
+}
+
 function toJointAngles(q: number[]): JointAngles {
   return { J1: q[0], J2: q[1], J3: q[2], J4: q[3], J5: q[4], J6: q[5] };
 }
@@ -578,7 +593,8 @@ const initialProgress: ExecutionProgress = {
   totalPointsInSegment: 0,
   overallProgress: 0,
   elapsedTime: 0,
-  estimatedTimeRemaining: 0
+  estimatedTimeRemaining: 0,
+  waiting: null
 };
 
 export const useRobotStore = create<RobotStore>((set, get) => ({
@@ -2190,7 +2206,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         totalPointsInSegment: 0,
         overallProgress: 0,
         elapsedTime: 0,
-        estimatedTimeRemaining: trajectory.totalDuration
+        estimatedTimeRemaining: trajectory.totalDuration,
+        waiting: null
       }
     });
 
@@ -2258,6 +2275,121 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         aborted() ? 'aborted' : executionPaused ? 'paused' : null
       );
 
+    /** Show what the path is holding for, or clear it when it moves again. */
+    const showWaiting = (waiting: string | null) =>
+      set({ executionProgress: { ...get().executionProgress, waiting } });
+
+    /**
+     * Everything a waypoint does once the arm has stopped on it, in order:
+     * outputs, then whatever it is waiting for, then the dwell.
+     *
+     * The dwell is last on purpose. It is a settle time - the gripper was told
+     * to close, now give it 300 ms to actually close - so it belongs after the
+     * thing it is settling from, not before.
+     *
+     * Returns false when the path should stop, having already reset.
+     */
+    const holdAt = async (wp: Waypoint): Promise<boolean> => {
+      for (const action of wp.setOutputs ?? []) {
+        await get().setOutput(action.index, action.high);
+      }
+
+      if (wp.waitForInput && !(await waitForInput(wp))) return false;
+      if (wp.dwellSeconds && wp.dwellSeconds > 0 && !(await dwell(wp.dwellSeconds))) return false;
+
+      showWaiting(null);
+      return true;
+    };
+
+    /** Hold until an input reads what the waypoint asked for. */
+    const waitForInput = async (wp: Waypoint): Promise<boolean> => {
+      const want = wp.waitForInput!;
+      const name = get().ioNames.inputs[want.index] ?? `in ${want.index + 1}`;
+      const wanted = `${name} ${want.high ? 'on' : 'off'}`;
+
+      // An index the firmware does not have can never come true, so waiting the
+      // timeout out would report a timeout for what is really a typo.
+      const count = get().ioNames.inputs.length;
+      if (count > 0 && (want.index < 0 || want.index >= count)) {
+        get().logEvent(
+          'error',
+          `Path stopped: waypoint "${wp.label ?? wp.id}" waits on input ${want.index + 1}, ` +
+            `and the firmware reports only ${count}`
+        );
+        stopAndReset();
+        return false;
+      }
+
+      let deadline = Date.now() + want.timeoutSeconds * 1000;
+      for (;;) {
+        if (aborted()) {
+          stopAndReset();
+          return false;
+        }
+
+        // The state is only as fresh as the firmware's periodic report, which is
+        // every 50 ms - so this resolves to about that, and polling faster would
+        // only re-read the same value.
+        const state = get().ioState;
+        if (state && state.inputs[want.index] === want.high) {
+          showWaiting(null);
+          return true;
+        }
+
+        if (Date.now() >= deadline) {
+          get().logEvent(
+            'error',
+            `Path stopped: waited ${want.timeoutSeconds}s at "${wp.label ?? wp.id}" for ` +
+              `${wanted} and it never came`
+          );
+          stopAndReset();
+          return false;
+        }
+
+        if (executionPaused) {
+          const pausedAt = Date.now();
+          showWaiting(`paused, waiting for ${wanted}`);
+          while (executionPaused) {
+            if (aborted()) {
+              stopAndReset();
+              return false;
+            }
+            await sleep(100);
+          }
+          // Paused means paused: the deadline moves out by however long the arm
+          // was held, rather than running out while somebody looks at the bench.
+          deadline += Date.now() - pausedAt;
+          continue;
+        }
+
+        showWaiting(
+          `waiting for ${wanted} — ${Math.ceil((deadline - Date.now()) / 1000)}s left`
+        );
+        await sleep(50);
+      }
+    };
+
+    /** Sit still for a while, without losing the ability to stop. */
+    const dwell = async (seconds: number): Promise<boolean> => {
+      let left = seconds * 1000;
+      while (left > 0) {
+        if (aborted()) {
+          stopAndReset();
+          return false;
+        }
+        if (executionPaused) {
+          // Not counted against the dwell: a paused arm is not settling.
+          await sleep(100);
+          continue;
+        }
+        showWaiting(`holding — ${(left / 1000).toFixed(1)}s`);
+        const step = Math.min(100, left);
+        await sleep(step);
+        left -= step;
+      }
+      return true;
+    };
+
     /** Wait for a status report, issued after `since`, that says the arm is idle. */
     const waitUntilIdle = async (since: number): Promise<void> => {
       for (let attempt = 0; attempt < 3000; attempt++) {
@@ -2318,21 +2450,19 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
             continue;
           }
 
-          // Outputs attached to a waypoint fire once the arm has actually
-          // arrived, not when its last point was accepted. The firmware holds a
-          // deep queue on purpose - that is what keeps motion continuous - so an
-          // acknowledgement means "queued", and a gripper commanded on it opens
-          // seconds early, somewhere over the bench.
+          // Everything a waypoint does on arrival happens once the arm has
+          // actually stopped there, not when its last point was accepted. The
+          // firmware holds a deep queue on purpose - that is what keeps motion
+          // continuous - so an acknowledgement means "queued", and a gripper
+          // commanded on it opens seconds early, somewhere over the bench.
           const arrived = arrivals[i] ?? null;
-          if (arrived?.setOutputs?.length) {
+          if (arrived && hasArrivalWork(arrived)) {
             await get().waitUntilIdle(Date.now(), aborted);
             if (aborted()) {
               stopAndReset();
               return;
             }
-            for (const action of arrived.setOutputs) {
-              await get().setOutput(action.index, action.high);
-            }
+            if (!(await holdAt(arrived))) return;
           }
 
           const where = locateSegment(trajectory, i);
@@ -2352,7 +2482,9 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
               estimatedTimeRemaining: Math.max(
                 0,
                 trajectory.totalDuration * iterations - elapsedTime
-              )
+              ),
+              // Moving again: whatever the last waypoint was holding for is done.
+              waiting: null
             }
           });
 

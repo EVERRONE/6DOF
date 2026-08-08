@@ -389,6 +389,38 @@ inclinometer for roll and pitch, and a square for yaw.
       abandon the path, and say it is reconnecting. Plug it back in: it should
       reopen the port on its own and warn that re-homing is needed.
 
+### What a waypoint does when the arm gets there
+
+The ⏱ button on a waypoint row opens it. Three things, in the order they happen:
+
+1. **Drive outputs** — on, off, or leave alone, per output.
+2. **Wait for an input** — until it reads on or off, giving up after a timeout.
+3. **Hold still** — a settle time, for an actuator that was just told to move.
+
+All three cost the path its continuous motion *at that waypoint*, and the reason
+is worth knowing: the firmware's queue is what carries speed through a junction,
+so the host has to let it drain and see the arm genuinely stop before anything
+fires. An acknowledgement means "queued", and a gripper commanded on one opens
+seconds early, somewhere over the bench. A waypoint with no actions still runs
+straight through — that is why they are off by default.
+
+- [ ] **Dwell, testable with nothing wired.** Put 2 s on the middle waypoint of a
+      path and run it. The arm should stop dead there, the panel should count
+      down, and it should carry on. Pause during the countdown: it holds, and
+      resumes where it left off rather than losing the time.
+- [ ] **Wait for an input, testable with a jumper wire.** The inputs are on pins
+      38–41 and are wired active-low, so an open pin reads *off*. Set a waypoint
+      to wait for `part` to be **on**, run the path, and short pin 38 to ground
+      when the arm gets there. It should carry straight on.
+
+      Leave it open instead and the path should **stop** when the timeout runs
+      out, with the reason in the console. That is deliberate: carrying on as
+      though the signal had come is how a press closes on a part that is not
+      there.
+
+> A wait always has a timeout, and it cannot be turned off. A wait with no limit
+> turns a path that will never finish into one that merely looks busy.
+
 ---
 
 ## When you are done

@@ -1817,3 +1817,209 @@ describe('store: telling the checker what is on the flange', () => {
     expect(checkSelfCollision(q).colliding).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+
+describe('store: a path that waits', () => {
+  /**
+   * Keep the link alive the way the real firmware does.
+   *
+   * A path that holds at a waypoint is the first thing here that stays running
+   * for longer than the SerialManager's 2 s link timeout, and the fake port only
+   * speaks when spoken to. Without a heartbeat the watchdog declares the cable
+   * dead mid-dwell and abandons the path - which is correct behaviour against a
+   * controller that really has gone quiet, and nothing to do with waiting.
+   */
+  const heartbeat = (port: FakePort) => {
+    const timer = setInterval(() => port.push(STATUS_IDLE), 25);
+    return () => clearInterval(timer);
+  };
+
+  /** Real elapsed time, unlike settle(), which only drains microtasks. */
+  const after = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+  /** Two waypoints, the second carrying whatever this test is about. */
+  const planWith = (extra: Partial<Waypoint>) => {
+    const store = useRobotStore.getState();
+    store.clearWaypoints();
+    store.updatePlannerConfig({ interpolationMode: 'joint', pointsPerSecond: 4 });
+    store.addWaypoint(makeWaypoint([0, 12, 55, 129, 131, 0], 'a'));
+    store.addWaypoint({ ...makeWaypoint([0, 20, 58, 129, 131, 0], 'b'), ...extra });
+    store.planTrajectory();
+  };
+
+  /** The firmware naming one output and one input, and reporting the input. */
+  const withOneInput = async (port: FakePort, high: boolean) => {
+    port.push('IONAME OUT 1 gripper\nIONAME IN 1 part\n');
+    await flush();
+    port.push(`IO 0 ${high ? 1 : 0}\n`);
+    await flush();
+  };
+
+  it('holds still for the dwell before finishing', async () => {
+    const { port } = await connectStore();
+    const stop = heartbeat(port);
+    try {
+      planWith({ dwellSeconds: 0.4 });
+
+      const run = useRobotStore.getState().executeTrajectory();
+      await settle(40);
+      await after(150);
+
+      // Arrived, and sitting out the dwell rather than finishing.
+      expect(useRobotStore.getState().executionState).toBe(ExecutionState.EXECUTING);
+      expect(useRobotStore.getState().executionProgress.waiting).toMatch(/holding/);
+
+      await run;
+      expect(useRobotStore.getState().executionState).toBe(ExecutionState.COMPLETED);
+      // Cleared afterwards, or the panel says the path is waiting on something
+      // long after it finished.
+      expect(useRobotStore.getState().executionProgress.waiting).toBeNull();
+    } finally {
+      stop();
+    }
+  });
+
+  it('goes on as soon as the input reads what it was told to wait for', async () => {
+    const { port } = await connectStore();
+    const stop = heartbeat(port);
+    try {
+      await withOneInput(port, false);
+      planWith({ waitForInput: { index: 0, high: true, timeoutSeconds: 30 } });
+
+      const run = useRobotStore.getState().executeTrajectory();
+      await settle(40);
+      await after(150);
+
+      // Holding: the input is still low.
+      expect(useRobotStore.getState().executionState).toBe(ExecutionState.EXECUTING);
+      expect(useRobotStore.getState().executionProgress.waiting).toMatch(/waiting for part on/);
+
+      port.push('IO 0 1\n');
+      await run;
+      expect(useRobotStore.getState().executionState).toBe(ExecutionState.COMPLETED);
+    } finally {
+      stop();
+    }
+  });
+
+  it('does not wait at all when the input already reads right', async () => {
+    const { port } = await connectStore();
+    const stop = heartbeat(port);
+    try {
+      await withOneInput(port, true);
+      planWith({ waitForInput: { index: 0, high: true, timeoutSeconds: 30 } });
+
+      await useRobotStore.getState().executeTrajectory();
+      expect(useRobotStore.getState().executionState).toBe(ExecutionState.COMPLETED);
+    } finally {
+      stop();
+    }
+  });
+
+  it('stops the path when the wait runs out, rather than carrying on', async () => {
+    // The behaviour that matters. Treating a timeout as "close enough" is how a
+    // press closes on a part that is not there.
+    const { port } = await connectStore();
+    const stop = heartbeat(port);
+    try {
+      await withOneInput(port, false);
+      planWith({ waitForInput: { index: 0, high: true, timeoutSeconds: 0.3 } });
+
+      await useRobotStore.getState().executeTrajectory();
+
+      expect(useRobotStore.getState().executionState).not.toBe(ExecutionState.COMPLETED);
+      expect(
+        useRobotStore.getState().events.some(e => e.kind === 'error' && /never came/.test(e.text))
+      ).toBe(true);
+    } finally {
+      stop();
+    }
+  });
+
+  it('fails fast on an input the firmware does not have', async () => {
+    // A wait on input 4 of 1 can never come true, so timing it out would report
+    // a slow fixture for what is a typo.
+    const { port } = await connectStore();
+    const stop = heartbeat(port);
+    try {
+      await withOneInput(port, false);
+      planWith({ waitForInput: { index: 3, high: true, timeoutSeconds: 60 } });
+
+      await useRobotStore.getState().executeTrajectory();
+
+      expect(
+        useRobotStore.getState().events.some(e => e.kind === 'error' && /reports only 1/.test(e.text))
+      ).toBe(true);
+    } finally {
+      stop();
+    }
+  });
+
+  it('can be cancelled while it is waiting', async () => {
+    // Otherwise a wait for something that will never happen is unstoppable short
+    // of unplugging the arm.
+    const { port } = await connectStore();
+    const stop = heartbeat(port);
+    try {
+      await withOneInput(port, false);
+      planWith({ waitForInput: { index: 0, high: true, timeoutSeconds: 600 } });
+
+      const run = useRobotStore.getState().executeTrajectory();
+      await settle(40);
+      await after(150);
+      expect(useRobotStore.getState().executionProgress.waiting).toMatch(/waiting/);
+
+      useRobotStore.getState().cancelExecution();
+      await run;
+
+      expect(useRobotStore.getState().executionState).not.toBe(ExecutionState.COMPLETED);
+    } finally {
+      stop();
+    }
+  });
+
+  it('drives outputs before it starts waiting, not after', async () => {
+    // The order is the point of putting both on one waypoint: tell the fixture
+    // to clamp, then wait for the clamped sensor. Reversed, it waits for a
+    // sensor nothing has been asked to trip.
+    const { port } = await connectStore();
+    const stop = heartbeat(port);
+    try {
+      await withOneInput(port, false);
+      planWith({
+        setOutputs: [{ index: 0, high: true }],
+        waitForInput: { index: 0, high: true, timeoutSeconds: 30 }
+      });
+
+      const run = useRobotStore.getState().executeTrajectory();
+      await settle(40);
+      await after(150);
+
+      expect(port.written.join('')).toContain('O 1 1');
+      expect(useRobotStore.getState().executionProgress.waiting).toMatch(/waiting for part/);
+
+      port.push('IO 1 1\n');
+      await run;
+      expect(useRobotStore.getState().executionState).toBe(ExecutionState.COMPLETED);
+    } finally {
+      stop();
+    }
+  });
+
+  it('leaves a waypoint that does nothing running straight through', async () => {
+    // Waiting for the arm to stop is what breaks continuous motion, so it must
+    // only happen where a waypoint actually does something.
+    const { port } = await connectStore();
+    const stop = heartbeat(port);
+    try {
+      planShortPath();
+      await useRobotStore.getState().executeTrajectory();
+
+      expect(useRobotStore.getState().executionState).toBe(ExecutionState.COMPLETED);
+      expect(useRobotStore.getState().executionProgress.waiting).toBeNull();
+    } finally {
+      stop();
+    }
+  });
+});

@@ -39,7 +39,8 @@ export const PathPlannerPanel: React.FC = () => {
     firmwareStatus,
     addCircle,
     toolLocked,
-    trajectoryCollision
+    trajectoryCollision,
+    ioNames
   } = useRobotStore();
 
   const [pathName, setPathName] = useState('');
@@ -270,6 +271,9 @@ export const PathPlannerPanel: React.FC = () => {
                 onMoveDown={() => handleMoveDown(index)}
                 onSpeedChange={(speed) => updateWaypoint(wp.id, { speed })}
                 onLabelChange={(label) => updateWaypoint(wp.id, { label })}
+                onUpdate={(updates) => updateWaypoint(wp.id, updates)}
+                outputNames={ioNames.outputs}
+                inputNames={ioNames.inputs}
                 disabled={isExecuting}
               />
             ))
@@ -527,6 +531,16 @@ export const PathPlannerPanel: React.FC = () => {
                 {(executionProgress.elapsedTime + executionProgress.estimatedTimeRemaining).toFixed(1)}s
               </span>
             </div>
+
+            {/* A path waiting on an input and a path that has hung look
+                identical from outside: the arm is stopped and the bar is not
+                moving. This is the difference between waiting and pulling the
+                plug. */}
+            {executionProgress.waiting && (
+              <div className="mt-1 px-2 py-1 rounded bg-blue-50 text-blue-900 text-xs font-medium">
+                {executionProgress.waiting}
+              </div>
+            )}
           </div>
         )}
 
@@ -603,6 +617,10 @@ interface WaypointItemProps {
   onMoveDown: () => void;
   onSpeedChange: (speed: number) => void;
   onLabelChange: (label: string) => void;
+  onUpdate: (updates: Partial<Waypoint>) => void;
+  /** Names the firmware gave its I/O, so a row reads "gripper" not "output 1". */
+  outputNames: string[];
+  inputNames: string[];
   disabled: boolean;
 }
 
@@ -615,12 +633,21 @@ const WaypointItem: React.FC<WaypointItemProps> = ({
   onMoveDown,
   onSpeedChange,
   onLabelChange,
+  onUpdate,
+  outputNames,
+  inputNames,
   disabled
 }) => {
   const [isEditing, setIsEditing] = useState(false);
+  const [showActions, setShowActions] = useState(false);
+
+  const wait = waypoint.waitForInput;
+  const actions =
+    (waypoint.setOutputs?.length ?? 0) + (wait ? 1 : 0) + (waypoint.dwellSeconds ? 1 : 0);
 
   return (
-    <div className="flex items-center gap-1 p-1.5 bg-gray-50 rounded text-xs group">
+    <div className="bg-gray-50 rounded">
+    <div className="flex items-center gap-1 p-1.5 text-xs group">
       {/* Index badge */}
       <span className="w-5 h-5 flex items-center justify-center bg-blue-500 text-white rounded-full text-xs font-bold flex-shrink-0">
         {index + 1}
@@ -688,6 +715,21 @@ const WaypointItem: React.FC<WaypointItemProps> = ({
         &#9660;
       </button>
 
+      {/* What happens on arrival. Collapsed by default: most waypoints are just
+          a place to be, and a row per action would bury the path in the
+          two-thirds of points that do nothing. */}
+      <button
+        onClick={() => setShowActions(v => !v)}
+        className={`px-1 py-0.5 rounded ${
+          actions > 0
+            ? 'text-blue-700 font-semibold'
+            : 'text-gray-400 hover:text-gray-600'
+        }`}
+        title="What happens when the arm gets here"
+      >
+        {actions > 0 ? `\u23F1 ${actions}` : '\u23F1'}
+      </button>
+
       {/* Remove button */}
       <button
         onClick={onRemove}
@@ -697,6 +739,175 @@ const WaypointItem: React.FC<WaypointItemProps> = ({
       >
         &#10005;
       </button>
+    </div>
+
+    {showActions && (
+      <WaypointActions
+        waypoint={waypoint}
+        onUpdate={onUpdate}
+        outputNames={outputNames}
+        inputNames={inputNames}
+        disabled={disabled}
+      />
+    )}
+    </div>
+  );
+};
+
+/**
+ * What a waypoint does once the arm has stopped on it, in the order it happens:
+ * drive outputs, wait for an input, then dwell.
+ *
+ * All three cost the path its continuous motion at this point - the firmware's
+ * queue has to drain so the arm is genuinely stopped before anything fires,
+ * because an acknowledgement means "queued" and a gripper commanded on one opens
+ * seconds early, somewhere over the bench. That is the right trade when a
+ * waypoint does something and the wrong one when it does not, which is why a
+ * waypoint with no actions still runs straight through.
+ */
+const WaypointActions: React.FC<{
+  waypoint: Waypoint;
+  onUpdate: (updates: Partial<Waypoint>) => void;
+  outputNames: string[];
+  inputNames: string[];
+  disabled: boolean;
+}> = ({ waypoint, onUpdate, outputNames, inputNames, disabled }) => {
+  const outputs = waypoint.setOutputs ?? [];
+  const wait = waypoint.waitForInput;
+
+  const setOutput = (index: number, high: boolean | null) => {
+    const rest = outputs.filter(o => o.index !== index);
+    onUpdate({ setOutputs: high === null ? rest : [...rest, { index, high }] });
+  };
+
+  return (
+    <div className="px-2 pb-2 pt-1 border-t border-gray-200 space-y-2 text-xs">
+      {outputNames.length === 0 && inputNames.length === 0 && (
+        <p className="text-gray-500">
+          The firmware has not reported its I/O yet — connect, and the names appear
+          here.
+        </p>
+      )}
+
+      {outputNames.length > 0 && (
+        <div>
+          <div className="text-gray-500 mb-1">1. Drive outputs</div>
+          <div className="space-y-1">
+            {outputNames.map((name, index) => {
+              const set = outputs.find(o => o.index === index);
+              return (
+                <div key={index} className="flex items-center gap-2">
+                  <span className="w-20 truncate text-gray-700" title={name}>{name}</span>
+                  {([['leave', null], ['on', true], ['off', false]] as const).map(
+                    ([label, value]) => (
+                      <button
+                        key={label}
+                        onClick={() => setOutput(index, value)}
+                        disabled={disabled}
+                        className={`px-1.5 py-0.5 rounded border ${
+                          (set?.high ?? null) === value
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-100'
+                        } disabled:opacity-40`}
+                      >
+                        {label}
+                      </button>
+                    )
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {inputNames.length > 0 && (
+        <div>
+          <div className="text-gray-500 mb-1">2. Wait for an input</div>
+          <div className="flex items-center gap-1 flex-wrap">
+            <select
+              value={wait ? String(wait.index) : ''}
+              onChange={e =>
+                onUpdate({
+                  waitForInput:
+                    e.target.value === ''
+                      ? undefined
+                      : {
+                          index: Number(e.target.value),
+                          high: wait?.high ?? true,
+                          // Long enough that a slow fixture is not called a
+                          // failure, short enough that a path which will never
+                          // finish says so while somebody is still watching.
+                          timeoutSeconds: wait?.timeoutSeconds ?? 30
+                        }
+                })
+              }
+              disabled={disabled}
+              className="px-1 py-0.5 border rounded"
+            >
+              <option value="">don't wait</option>
+              {inputNames.map((name, index) => (
+                <option key={index} value={index}>{name}</option>
+              ))}
+            </select>
+
+            {wait && (
+              <>
+                <select
+                  value={wait.high ? 'on' : 'off'}
+                  onChange={e => onUpdate({ waitForInput: { ...wait, high: e.target.value === 'on' } })}
+                  disabled={disabled}
+                  className="px-1 py-0.5 border rounded"
+                >
+                  <option value="on">is on</option>
+                  <option value="off">is off</option>
+                </select>
+                <span className="text-gray-500">give up after</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={wait.timeoutSeconds}
+                  onChange={e =>
+                    onUpdate({
+                      waitForInput: { ...wait, timeoutSeconds: Math.max(1, Number(e.target.value) || 1) }
+                    })
+                  }
+                  disabled={disabled}
+                  className="w-12 px-1 py-0.5 border rounded text-right font-mono"
+                />
+                <span className="text-gray-500">s</span>
+              </>
+            )}
+          </div>
+          {wait && (
+            <p className="mt-1 text-gray-500">
+              Running out stops the path. Carrying on as though it had come is how
+              a press closes on a part that is not there.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div>
+        <div className="text-gray-500 mb-1">3. Then hold still for</div>
+        <div className="flex items-center gap-1">
+          <input
+            type="number"
+            min={0}
+            step={0.1}
+            value={waypoint.dwellSeconds ?? 0}
+            onChange={e => {
+              const v = Math.max(0, Number(e.target.value) || 0);
+              onUpdate({ dwellSeconds: v > 0 ? v : undefined });
+            }}
+            disabled={disabled}
+            className="w-14 px-1 py-0.5 border rounded text-right font-mono"
+          />
+          <span className="text-gray-500">
+            s — settle time, for an actuator that was just told to move
+          </span>
+        </div>
+      </div>
     </div>
   );
 };

@@ -78,6 +78,35 @@ export interface Waypoint {
    * with a gripper, that is the part let go somewhere over the bench.
    */
   setOutputs?: Array<{ index: number; high: boolean }>;
+  /**
+   * Hold here until an input reads `high`, then carry on.
+   *
+   * The other half of the I/O. Driving an output says something to the world;
+   * this is the only way the world says anything back, and without it a path can
+   * only ever run open-loop on its own clock - closing a gripper and moving off
+   * whether or not anything was gripped.
+   *
+   * `timeoutSeconds` is required rather than optional. A wait with no limit
+   * turns a path that will never finish into a path that looks like it is still
+   * working, and the arm sits there holding position until somebody notices.
+   * Running out stops the path with an error: carrying on as though the
+   * condition had been met is how a press closes on a part that is not there.
+   */
+  waitForInput?: {
+    /** Zero-based, matching the firmware's input order. */
+    index: number;
+    /** The state to wait for, already corrected for active-low wiring. */
+    high: boolean;
+    timeoutSeconds: number;
+  };
+  /**
+   * Sit still here for this long before moving on.
+   *
+   * What an actuator needs: an output is commanded and the gripper takes 300 ms
+   * to close, during which the arm must not move. Applied last, so it is a settle
+   * time after everything else this waypoint does.
+   */
+  dwellSeconds?: number;
 }
 
 /**
@@ -219,6 +248,16 @@ export interface ExecutionProgress {
   overallProgress: number;     // 0-100
   elapsedTime: number;         // seconds
   estimatedTimeRemaining: number; // seconds
+  /**
+   * What the path is holding at a waypoint for, ready to show, or null while it
+   * is moving.
+   *
+   * Held because a path waiting on an input and a path that has hung look
+   * identical from outside: the arm is stopped, the progress bar is not moving,
+   * and nothing says which. That is the difference between waiting and pulling
+   * the plug.
+   */
+  waiting: string | null;
 }
 
 /**
