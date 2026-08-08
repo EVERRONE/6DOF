@@ -304,24 +304,52 @@ export class PathInterpolator {
       'backward'
     );
 
-    // No better - keep the forward pass and its discontinuity, so the caller
-    // still gets told rather than being handed a worse path silently.
-    if (backward.discontinuity || backward.points.length !== forward.points.length) {
-      return { ...forward, duration, distance };
+    if (!backward.discontinuity && backward.points.length === forward.points.length) {
+      const entry = backward.points[0].jointAngles;
+      const swing = Math.max(...entry.map((v, i) => Math.abs(v - startAngles[i])));
+
+      return {
+        ...backward,
+        duration,
+        distance,
+        reconfiguration: swing > RECONFIGURE_THRESHOLD_DEG ? [...entry] : null
+      };
     }
 
-    // What the backward pass needs the arm to be in when the segment starts. The
-    // tool pose there is the same one it is in now - it is the same solve, at the
-    // same target - so getting into it is a wrist turning in place.
-    const entry = backward.points[0].jointAngles;
-    const swing = Math.max(...entry.map((v, i) => Math.abs(v - startAngles[i])));
+    // Backward did not help either, which is what happens on a short move: its
+    // far end is only millimetres away, so it is just as badly conditioned as
+    // the near one. A 5 mm jog away from the singularity cannot be rescued by
+    // starting from the other end of 5 mm.
+    //
+    // But the forward pass has already found the configuration the line wants -
+    // it is the one on the far side of the jump. Solving the *start* point from
+    // there gives the same tool pose in that configuration, and walking forward
+    // from it never has to reconfigure at all. This is the general form of what
+    // the backward pass does by luck on a long line.
+    const jump = forward.discontinuity;
+    const after = forward.points[Math.min(jump.index, forward.points.length - 1)].jointAngles;
+    const entrySolve = this.solveAtMatrix(pointOnPiece(piece, 0), turn ? turn(0) : null, after);
 
-    return {
-      ...backward,
-      duration,
-      distance,
-      reconfiguration: swing > RECONFIGURE_THRESHOLD_DEG ? [...entry] : null
-    };
+    if (entrySolve.success) {
+      const hoisted = this.walk(piece, turn, profile, steps, entrySolve.jointAngles, 'forward');
+
+      if (!hoisted.discontinuity && hoisted.points.length === forward.points.length) {
+        const entry = hoisted.points[0].jointAngles;
+        const swing = Math.max(...entry.map((v, i) => Math.abs(v - startAngles[i])));
+
+        return {
+          ...hoisted,
+          duration,
+          distance,
+          reconfiguration: swing > RECONFIGURE_THRESHOLD_DEG ? [...entry] : null
+        };
+      }
+    }
+
+    // Nothing worked - keep the forward pass and its discontinuity, so the
+    // caller is told rather than handed a worse path silently.
+    return { ...forward, duration, distance };
+
   }
 
   /**
@@ -382,7 +410,7 @@ export class PathInterpolator {
       duration: profile.getDuration(),
       distance: piece.length,
       unreachableSamples: failures,
-      discontinuity: findDiscontinuity(points)
+      discontinuity: findDiscontinuity(points, piece.length)
     };
   }
 
@@ -455,7 +483,7 @@ export class PathInterpolator {
       duration,
       distance: length,
       unreachableSamples: failures,
-      discontinuity: findDiscontinuity(points)
+      discontinuity: findDiscontinuity(points, length)
     };
   }
 
@@ -578,6 +606,21 @@ const JUMP_FACTOR = 10;
 const JUMP_FLOOR_DEG = 5;
 
 /**
+ * Degrees of joint travel per millimetre of tool travel, above which a step is a
+ * reconfiguration whatever the rest of the path looks like.
+ *
+ * The relative test above cannot stand alone. It compares a step against the
+ * path's median step, which is meaningful over a hundred samples and meaningless
+ * over eight: a short jog near a singularity has *every* step large, so the
+ * outlier test finds no outlier and a 43 degree swap over 5 mm passes as normal.
+ *
+ * This one is a physical ratio and does not care how long the path is or how
+ * finely it was sampled. A well-conditioned path costs well under a degree per
+ * millimetre; ten is already the arm reconfiguring rather than travelling.
+ */
+const JUMP_DEG_PER_MM = 10;
+
+/**
  * How far the wrist has to be from the configuration a segment needs before the
  * caller is told to turn it there first.
  *
@@ -595,7 +638,11 @@ const RECONFIGURE_THRESHOLD_DEG = 5;
  * not help: the jump is in joint space, and halving the Cartesian step just puts
  * the same reconfiguration into a smaller gap.
  */
-function findDiscontinuity(points: TrajectoryPoint[]): TrajectorySegment['discontinuity'] {
+function findDiscontinuity(
+  points: TrajectoryPoint[],
+  /** Tool travel the whole piece covers, in metres. Used for the °/mm test. */
+  distance: number
+): TrajectorySegment['discontinuity'] {
   if (points.length < 3) return null;
 
   const steps: number[] = [];
@@ -618,10 +665,17 @@ function findDiscontinuity(points: TrajectoryPoint[]): TrajectorySegment['discon
   const sorted = [...steps].sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
 
+  // How far the tool moves between two samples, in millimetres.
+  const perStepMm = (distance * 1000) / steps.length;
+
   let worst = -1;
   for (let i = 0; i < steps.length; i++) {
     if (steps[i] < JUMP_FLOOR_DEG) continue;
-    if (steps[i] < JUMP_FACTOR * median) continue;
+
+    const outlier = steps[i] >= JUMP_FACTOR * median;
+    const steep = perStepMm > 1e-9 && steps[i] / perStepMm >= JUMP_DEG_PER_MM;
+    if (!outlier && !steep) continue;
+
     if (worst < 0 || steps[i] > steps[worst]) worst = i;
   }
 

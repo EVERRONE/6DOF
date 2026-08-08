@@ -408,3 +408,79 @@ describe('F. the reconfiguration a whole path needs', () => {
     expect(traj.reconfiguration ?? null).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// G. Short moves from the singularity
+// ---------------------------------------------------------------------------
+
+describe('G. a short jog from the parked pose', () => {
+  const interp = new PathInterpolator();
+
+  it('is caught by the degrees-per-millimetre test, which the outlier test misses', () => {
+    // A 5 mm jog samples eight times, and near the singularity *every* step is
+    // large - so the outlier test finds no outlier and a 43 degree wrist swap
+    // over 5 mm passed as an ordinary path. The physical ratio does not care how
+    // long the path is or how finely it was sampled.
+    const start = [...HOME_POSE_DEG];
+    const from = ForwardKinematics.position(start);
+
+    const seg = interp.interpolateCartesianSpace(
+      start, { x: from.x, y: from.y + 0.005, z: from.z }, 50, 200, 20,
+      matrixToRpy(fk(start).rotation)
+    );
+
+    // Rescued rather than merely detected: solving the start from the far side
+    // of the jump gives the configuration the line wants, and walking from there
+    // never reconfigures.
+    expect(seg.discontinuity).toBeNull();
+    expect(seg.reconfiguration).toBeTruthy();
+
+    let worst = 0;
+    for (let i = 1; i < seg.points.length; i++) {
+      for (let j = 0; j < 6; j++) {
+        worst = Math.max(
+          worst,
+          Math.abs(seg.points[i].jointAngles[j] - seg.points[i - 1].jointAngles[j])
+        );
+      }
+    }
+    expect(worst).toBeLessThan(1);
+  });
+
+  it('turns the wrist in place first, and that is still free at the tool', () => {
+    // The backward pass cannot help here - the far end of a 5 mm line is 5 mm
+    // from the singularity, so it is just as badly conditioned as the near end.
+    const start = [...HOME_POSE_DEG];
+    const from = ForwardKinematics.position(start);
+
+    for (const mm of [5, 8, 25]) {
+      const seg = interp.interpolateCartesianSpace(
+        start, { x: from.x, y: from.y + mm / 1000, z: from.z }, 50, 200, 20,
+        matrixToRpy(fk(start).rotation)
+      );
+      const entry = seg.reconfiguration!;
+      expect(entry).toBeTruthy();
+      expect(Math.max(...entry.map((v, i) => Math.abs(v - start[i])))).toBeGreaterThan(20);
+
+      for (let k = 0; k <= 20; k++) {
+        const t = k / 20;
+        const mid = start.map((v, i) => v + t * (entry[i] - v));
+        expect(dist(ForwardKinematics.position(mid), from) * 1000).toBeLessThan(0.5);
+        expect(angleBetween(fk(mid).rotation, fk(start).rotation)).toBeLessThan(0.5);
+      }
+    }
+  });
+
+  it('leaves a well-conditioned short move alone', () => {
+    const start = offSingularity();
+    const from = ForwardKinematics.position(start);
+
+    const seg = interp.interpolateCartesianSpace(
+      start, { x: from.x, y: from.y + 0.005, z: from.z }, 50, 200, 20,
+      matrixToRpy(fk(start).rotation)
+    );
+
+    expect(seg.discontinuity).toBeNull();
+    expect(seg.reconfiguration ?? null).toBeNull();
+  });
+});
