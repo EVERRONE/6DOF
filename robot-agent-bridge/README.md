@@ -124,3 +124,17 @@ npm test
 Covers parameter validation and clamping, token and Origin rejection, the
 no-executor path, command round-trip, verbatim error pass-through, the timeout
 path, and the audit log.
+
+There is also an **integration test on the web side**
+(`robot-arm-control/src/agent/__tests__/bridgeIntegration.test.ts`) that starts
+this broker in a child process and drives it with the real browser client over a
+real WebSocket:
+
+```bash
+cd ../robot-arm-control
+npm test -- --watchAll=false --runInBand --testPathPattern bridgeIntegration
+```
+
+That is the only test forcing `src/protocol.js` here and `bridgeProtocol.ts`
+there to agree — renaming a field on one side fails it. Run it after touching
+either.

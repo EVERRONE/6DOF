@@ -8,7 +8,7 @@ It was audited against code on 2026-03-25.
 ## Audit Status
 
 - Web tests verified: `npm test -- --watchAll=false --runInBand`
-  - Result: 24 suites passed, 102 tests passed (as of 2026-08-08)
+  - Result: 25 suites passed, 114 tests passed (as of 2026-08-08)
 - Web production build verified: `npm run build`
   - Result: succeeds with warnings
   - Current warning: missing source map in transitive dependency `@mediapipe/tasks-vision`
@@ -530,7 +530,12 @@ Facts that matter when working on it:
   subscribes before commanding and settles on `TQ_DONE`, `'failed'`, an
   emergency stop, or a timeout that reports "unknown". Do not replace this with
   an `await`.
-- Motion was verified by unit tests only; it has not yet run against hardware.
+- `src/agent/__tests__/bridgeIntegration.test.ts` runs the **real broker in a
+  child process** against the **real client over a real WebSocket**. It is the
+  only thing forcing `robot-agent-bridge/src/protocol.js` and
+  `src/agent/bridgeProtocol.ts` to agree — renaming a field on one side fails
+  it. Keep it working when touching either file.
+- Motion was verified by tests only; it has not yet run against hardware.
 
 Only one existing file is touched by the whole feature: `App.tsx` mounts the
 panel. Keep it that way.
